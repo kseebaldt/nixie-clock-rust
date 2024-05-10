@@ -1,6 +1,9 @@
 use esp_idf_svc::sntp;
 use esp_idf_svc::sys::EspError;
 
+use chrono::Utc;
+use chrono_tz::Tz;
+
 #[toml_cfg::toml_config]
 pub struct Config {
     #[default("Wokwi-GUEST")]
@@ -28,10 +31,13 @@ fn main() -> Result<(), EspError> {
     let _sntp = sntp::EspSntp::new_default()?;
     info!("SNTP initialized");
 
+    let tz: Tz = "America/Chicago".parse().unwrap();
+    info!("Time Zone: {:?}", tz);
+
     loop {
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates
-        info!("Current time: {:?}", std::time::SystemTime::now());
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        info!("Current time: {:?}", Utc::now().with_timezone(&tz));
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
