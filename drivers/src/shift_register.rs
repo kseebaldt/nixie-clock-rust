@@ -49,54 +49,57 @@ where
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
-    use embedded_hal_mock::eh1::pin::{
-        Mock as PinMock, State as PinState, Transaction as PinTransaction,
-    };
+    use testing::digital::FakePin;
+    use std::vec;
 
     #[test]
     fn it_works() {
-        let mut data_pin = PinMock::new(&[
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-        ]);
-        let mut clock_pin = PinMock::new(&[
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-        ]);
-        let mut latch_pin = PinMock::new(&[
-            PinTransaction::set(PinState::High),
-            PinTransaction::set(PinState::Low),
-        ]);
+        let mut data_pin = FakePin::new();
+        let mut clock_pin = FakePin::new();
+        let mut latch_pin = FakePin::new();
 
-        let mut r: ShiftRegister<PinMock, PinMock, PinMock> =
+        let mut r: ShiftRegister<FakePin, FakePin, FakePin> =
             ShiftRegister::new(&mut data_pin, &mut clock_pin, &mut latch_pin);
 
         r.shift(5);
         r.store();
 
-        data_pin.done();
-        clock_pin.done();
-        latch_pin.done();
+        assert_eq!(
+            data_pin.states(),
+            vec![
+                PinState::Low,
+                PinState::Low,
+                PinState::Low,
+                PinState::Low,
+                PinState::Low,
+                PinState::High,
+                PinState::Low,
+                PinState::High
+            ]
+        );
+        assert_eq!(
+            clock_pin.states(),
+            vec![
+                PinState::High,
+                PinState::Low,
+                PinState::High,
+                PinState::Low,
+                PinState::High,
+                PinState::Low,
+                PinState::High,
+                PinState::Low,
+                PinState::High,
+                PinState::Low,
+                PinState::High,
+                PinState::Low,
+                PinState::High,
+                PinState::Low,
+                PinState::High,
+                PinState::Low
+            ]
+        );
+        assert_eq!(latch_pin.states(), vec![PinState::High, PinState::Low]);
     }
 }
