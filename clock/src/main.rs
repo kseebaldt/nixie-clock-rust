@@ -1,8 +1,15 @@
 use esp_idf_svc::sntp;
 use esp_idf_svc::sys::EspError;
 
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use chrono_tz::Tz;
+
+use drivers::{nixie_display::NixieDisplay, shift_register::{Shift, ShiftRegister}};
+use esp_idf_svc::hal::{
+    gpio::*,
+    modem::Modem,
+    prelude::*,
+};
 
 #[toml_cfg::toml_config]
 pub struct Config {
@@ -24,8 +31,25 @@ fn main() -> Result<(), EspError> {
 
     log::info!("Hello, world!");
 
+    let peripherals = Peripherals::take()?;
+    let pins = peripherals.pins;
+    let modem = peripherals.modem;
+
+    // Create the shift register
+    let mut data_pin = PinDriver::output(pins.gpio16)?;
+    let mut clock_pin = PinDriver::output(pins.gpio17)?;
+    let mut latch_pin = PinDriver::output(pins.gpio18)?;
+
+    let mut sr = ShiftRegister::new(
+        &mut data_pin,
+        &mut clock_pin,
+        &mut latch_pin,
+    );
+
+    let mut display = NixieDisplay::new(&mut sr);
+
     // Keep it around or else the wifi will stop
-    let _wifi = wifi_create()?;
+    let _wifi = wifi_create(modem)?;
 
     // Keep it around or else the SNTP service will stop
     let _sntp = sntp::EspSntp::new_default()?;
@@ -36,23 +60,31 @@ fn main() -> Result<(), EspError> {
 
     loop {
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates
-        info!("Current time: {:?}", Utc::now().with_timezone(&tz));
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let local_time = Utc::now().with_timezone(&tz);
+        info!("Current time: {:?}", local_time);
+
+        let a = (local_time.hour() / 10) as u8; 
+        let b = (local_time.hour() % 10) as u8;
+        let c = (local_time.minute() / 10) as u8; 
+        let d = (local_time.minute() % 10) as u8;
+
+        info!("Displaying: {}{}:{}{}", a, b, c, d);
+
+        display.show(&[a, b, c, d]);
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
-fn wifi_create() -> Result<esp_idf_svc::wifi::EspWifi<'static>, EspError> {
+fn wifi_create(modem: Modem) -> Result<esp_idf_svc::wifi::EspWifi<'static>, EspError> {
     use esp_idf_svc::eventloop::*;
-    use esp_idf_svc::hal::prelude::Peripherals;
     use esp_idf_svc::nvs::*;
     use esp_idf_svc::wifi::*;
 
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
-    let peripherals = Peripherals::take()?;
-
-    let mut esp_wifi = EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs.clone()))?;
+    let mut esp_wifi = EspWifi::new(modem, sys_loop.clone(), Some(nvs.clone()))?;
     let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone())?;
 
     let app_config = CONFIG;
