@@ -16,6 +16,7 @@ pub struct Config {
 }
 
 use log::info;
+use nixie_clock_rust::rgb_led::RgbLed;
 
 fn main() -> Result<(), EspError> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -30,6 +31,7 @@ fn main() -> Result<(), EspError> {
     let peripherals = Peripherals::take()?;
     let pins = peripherals.pins;
     let modem = peripherals.modem;
+    let ledc = peripherals.ledc;
 
     // Create the shift register
     let mut data_pin = PinDriver::output(pins.gpio16)?;
@@ -41,6 +43,20 @@ fn main() -> Result<(), EspError> {
     let mut sr = ShiftRegister::new(&mut data_pin, &mut clock_pin, &mut latch_pin);
 
     let mut display = NixieDisplay::new(&mut sr, &mut seperator1, &mut seperator2);
+
+    let mut rgb = RgbLed::new(
+        ledc.channel0,
+        ledc.timer0,
+        pins.gpio25,
+        ledc.channel1,
+        ledc.timer1,
+        pins.gpio26,
+        ledc.channel2,
+        ledc.timer2,
+        pins.gpio27,
+    )?;
+
+    rgb.set_color(0x00000088)?;
 
     // Keep it around or else the wifi will stop
     let _wifi = wifi_create(modem)?;
