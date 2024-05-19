@@ -1,15 +1,14 @@
 use esp_idf_svc::sntp;
 use esp_idf_svc::sys::EspError;
 
-use chrono::{Timelike, Utc};
+use chrono::Utc;
 use chrono_tz::Tz;
 
-use drivers::{nixie_display::NixieDisplay, shift_register::{Shift, ShiftRegister}};
-use esp_idf_svc::hal::{
-    gpio::*,
-    modem::Modem,
-    prelude::*,
+use drivers::{
+    nixie_display::NixieDisplay,
+    shift_register::ShiftRegister,
 };
+use esp_idf_svc::hal::{gpio::*, modem::Modem, prelude::*};
 
 #[toml_cfg::toml_config]
 pub struct Config {
@@ -39,14 +38,12 @@ fn main() -> Result<(), EspError> {
     let mut data_pin = PinDriver::output(pins.gpio16)?;
     let mut clock_pin = PinDriver::output(pins.gpio17)?;
     let mut latch_pin = PinDriver::output(pins.gpio18)?;
+    let mut seperator1 = PinDriver::output(pins.gpio4)?;
+    let mut seperator2 = PinDriver::output(pins.gpio2)?;
 
-    let mut sr = ShiftRegister::new(
-        &mut data_pin,
-        &mut clock_pin,
-        &mut latch_pin,
-    );
+    let mut sr = ShiftRegister::new(&mut data_pin, &mut clock_pin, &mut latch_pin);
 
-    let mut display = NixieDisplay::new(&mut sr);
+    let mut display = NixieDisplay::new(&mut sr, &mut seperator1, &mut seperator2);
 
     // Keep it around or else the wifi will stop
     let _wifi = wifi_create(modem)?;
@@ -63,14 +60,7 @@ fn main() -> Result<(), EspError> {
         let local_time = Utc::now().with_timezone(&tz);
         info!("Current time: {:?}", local_time);
 
-        let a = (local_time.hour() / 10) as u8; 
-        let b = (local_time.hour() % 10) as u8;
-        let c = (local_time.minute() / 10) as u8; 
-        let d = (local_time.minute() % 10) as u8;
-
-        info!("Displaying: {}{}:{}{}", a, b, c, d);
-
-        display.show(&[a, b, c, d]);
+        display.display(local_time);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
