@@ -4,10 +4,7 @@ use esp_idf_svc::sys::EspError;
 use chrono::Utc;
 use chrono_tz::Tz;
 
-use drivers::{
-    nixie_display::NixieDisplay,
-    shift_register::ShiftRegister,
-};
+use drivers::{nixie_display::NixieDisplay, shift_register::ShiftRegister};
 use esp_idf_svc::hal::{gpio::*, modem::Modem, prelude::*};
 
 #[toml_cfg::toml_config]
