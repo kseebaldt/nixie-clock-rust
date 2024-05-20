@@ -6,4 +6,4 @@ firmware = "clock/target/xtensa-esp32-espidf/debug/nixie-clock-rust"
 
 [[chip]]
 name = 'cd4511'
-binary = 'dist/chip.wasm'
+binary = 'chip/dist/chip.wasm'
