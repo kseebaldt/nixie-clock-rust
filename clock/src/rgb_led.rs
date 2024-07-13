@@ -8,14 +8,7 @@ pub struct RgbLed<'a> {
 }
 
 impl<'d> RgbLed<'d> {
-    pub fn new<
-        C1: LedcChannel,
-        C2: LedcChannel,
-        C3: LedcChannel,
-        T1: LedcTimer,
-        T2: LedcTimer,
-        T3: LedcTimer
-    >(
+    pub fn new<C1, C2, C3, T1, T2, T3>(
         red_channel: impl Peripheral<P = C1> + 'd,
         red_timer: impl Peripheral<P = T1> + 'd,
         red_pin: impl Peripheral<P = impl OutputPin> + 'd,
@@ -25,7 +18,15 @@ impl<'d> RgbLed<'d> {
         blue_channel: impl Peripheral<P = C3> + 'd,
         blue_timer: impl Peripheral<P = T3> + 'd,
         blue_pin: impl Peripheral<P = impl OutputPin> + 'd,
-    ) -> Result<Self, EspError> {
+    ) -> Result<Self, EspError> 
+    where
+    C1: LedcChannel<SpeedMode = <T1 as LedcTimer>::SpeedMode>,
+    C2: LedcChannel<SpeedMode = <T2 as LedcTimer>::SpeedMode>,
+    C3: LedcChannel<SpeedMode = <T3 as LedcTimer>::SpeedMode>,
+    T1: LedcTimer + 'd,
+    T2: LedcTimer + 'd,
+    T3: LedcTimer + 'd
+    {
         let red = LedcDriver::new(
             red_channel,
             LedcTimerDriver::new(
