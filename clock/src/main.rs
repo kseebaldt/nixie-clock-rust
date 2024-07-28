@@ -1,11 +1,15 @@
 use esp_idf_svc::sntp;
 use esp_idf_svc::sys::EspError;
+use esp_idf_svc::io::EspIOError;
 
 use chrono::Utc;
 use chrono_tz::Tz;
 
 use drivers::{nixie_display::NixieDisplay, shift_register::ShiftRegister};
+use embedded_svc::http::Method;
 use esp_idf_svc::hal::{gpio::*, modem::Modem, prelude::*};
+use esp_idf_svc::http::server::EspHttpServer;
+use esp_idf_svc::io::Write;
 
 #[toml_cfg::toml_config]
 pub struct Config {
@@ -18,7 +22,10 @@ pub struct Config {
 use log::info;
 use nixie_clock_rust::rgb_led::RgbLed;
 
-fn main() -> Result<(), EspError> {
+const STACK_SIZE: usize = 10240;
+static INDEX_HTML: &str = include_str!("../../dist/index.html");
+
+fn main() -> Result<(), EspIOError> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
     esp_idf_svc::sys::link_patches();
@@ -67,6 +74,19 @@ fn main() -> Result<(), EspError> {
 
     let tz: Tz = "America/Chicago".parse().unwrap();
     info!("Time Zone: {:?}", tz);
+
+    let server_configuration = esp_idf_svc::http::server::Configuration {
+        stack_size: STACK_SIZE,
+        ..Default::default()
+    };
+
+    let mut server = EspHttpServer::new(&server_configuration)?;
+
+    server.fn_handler("/", Method::Get, |req| {
+        req.into_ok_response()?
+            .write_all(INDEX_HTML.as_bytes())
+            .map(|_| ())
+    })?;
 
     loop {
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates

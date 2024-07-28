@@ -7,3 +7,7 @@ firmware = "clock/target/xtensa-esp32-espidf/debug/nixie-clock-rust"
 [[chip]]
 name = 'cd4511'
 binary = 'chip/dist/chip.wasm'
+
+[[net.forward]]
+from = "localhost:9080"
+to = "target:80"
