@@ -23,7 +23,7 @@ use log::info;
 use nixie_clock_rust::rgb_led::RgbLed;
 
 const STACK_SIZE: usize = 10240;
-static INDEX_HTML: &str = include_str!("../../dist/index.html");
+static INDEX_HTML: &str = include_str!("../../webapp/dist/index.html");
 
 fn main() -> Result<(), EspIOError> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
