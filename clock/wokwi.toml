@@ -1,0 +1,13 @@
+[wokwi]
+version = 1
+gdbServerPort = 3335
+elf = "target/xtensa-esp32-espidf/debug/nixie-clock-rust"
+firmware = "target/xtensa-esp32-espidf/debug/nixie-clock-rust"
+
+[[chip]]
+name = 'cd4511'
+binary = '../chip/dist/chip.wasm'
+
+[[net.forward]]
+from = "localhost:9080"
+to = "target:80"
