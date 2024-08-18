@@ -1,22 +1,28 @@
 {
 	"folders": [
 		{
+			"name": "nixie-clock-rust",
 			"path": "."
 		},
 		{
-			"path": "webapp"
-		},
-		{
-			"path": "drivers"
-		},
-		{
+			"name": "clock",
 			"path": "clock"
 		},
 		{
-			"path": "chip"
+			"name": "drivers",
+			"path": "drivers"
+		},		
+		{
+			"name": "webapp",
+			"path": "webapp"
 		},
 		{
+			"name": "testing",
 			"path": "testing"
+		},
+		{
+			"name": "chip",
+			"path": "chip"
 		}
 	],
 	"settings": {

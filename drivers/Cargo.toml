@@ -10,3 +10,5 @@ chrono = "0.4.38"
 
 [dev-dependencies]
 testing        = { path = "../testing" }
+serde = { version = "1.0", features = ["derive"] }
+postcard = "1.0"
