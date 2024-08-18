@@ -1,6 +1,6 @@
 use esp_idf_svc::sntp;
-use esp_idf_svc::sys::EspError;
-use esp_idf_svc::io::EspIOError;
+
+use anyhow::Result;
 
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -25,7 +25,7 @@ use nixie_clock_rust::rgb_led::RgbLed;
 const STACK_SIZE: usize = 10240;
 static INDEX_HTML: &str = include_str!("../../webapp/dist/index.html");
 
-fn main() -> Result<(), EspIOError> {
+fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
     esp_idf_svc::sys::link_patches();
@@ -99,7 +99,7 @@ fn main() -> Result<(), EspIOError> {
     }
 }
 
-fn wifi_create(modem: Modem) -> Result<esp_idf_svc::wifi::EspWifi<'static>, EspError> {
+fn wifi_create(modem: Modem) -> Result<esp_idf_svc::wifi::EspWifi<'static>> {
     use esp_idf_svc::eventloop::*;
     use esp_idf_svc::nvs::*;
     use esp_idf_svc::wifi::*;
