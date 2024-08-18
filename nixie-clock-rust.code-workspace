@@ -1,0 +1,31 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "webapp"
+		},
+		{
+			"path": "drivers"
+		},
+		{
+			"path": "clock"
+		},
+		{
+			"path": "chip"
+		},
+		{
+			"path": "testing"
+		}
+	],
+	"settings": {
+		"files.exclude": {
+			"chip": true,
+			"clock": true,
+			"drivers": true,
+			"testing": true,
+			"webapp": true
+		},
+	}
+}
