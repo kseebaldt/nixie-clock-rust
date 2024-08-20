@@ -108,7 +108,7 @@ mod tests {
     use std::vec::Vec;
     use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
     use hal::digital::PinState;
-    use testing::digital::FakePin;
+    use testing::digital::Recorder;
 
     use super::*;
     extern crate std;
@@ -141,8 +141,9 @@ mod tests {
     #[test]
     fn it_displays_time() {
         let mut mock = MockShift::new();
-        let sep1 = FakePin::new();
-        let sep2 = FakePin::new();
+        let recorder = Recorder::new();
+        let sep1 = recorder.create_pin(0);
+        let sep2 = recorder.create_pin(1);
 
         let mut display = NixieDisplay::new(&mut mock, sep1, sep2);
 
@@ -161,8 +162,9 @@ mod tests {
     #[test]
     fn it_turns_on_seperator_on_even_seconds() {
         let mut mock = MockShift::new();
-        let mut sep1 = FakePin::new();
-        let mut sep2 = FakePin::new();
+        let recorder = Recorder::new();
+        let mut sep1 = recorder.create_pin(0);
+        let mut sep2 = recorder.create_pin(1);
 
         let mut display = NixieDisplay::new(&mut mock, &mut sep1, &mut sep2);
 
@@ -179,8 +181,9 @@ mod tests {
     #[test]
     fn it_turns_off_seperator_on_odd_seconds() {
         let mut mock = MockShift::new();
-        let mut sep1 = FakePin::new();
-        let mut sep2 = FakePin::new();
+        let recorder = Recorder::new();
+        let mut sep1 = recorder.create_pin(0);
+        let mut sep2 = recorder.create_pin(1);
 
         let mut display = NixieDisplay::new(&mut mock, &mut sep1, &mut sep2);
 
@@ -197,8 +200,9 @@ mod tests {
     #[test]
     fn it_displays_date() {
         let mut mock = MockShift::new();
-        let mut sep1 = FakePin::new();
-        let mut sep2 = FakePin::new();
+        let recorder = Recorder::new();
+        let mut sep1 = recorder.create_pin(0);
+        let mut sep2 = recorder.create_pin(1);
 
         let mut display = NixieDisplay::new(&mut mock, &mut sep1, &mut sep2);
 
@@ -220,8 +224,9 @@ mod tests {
     #[test]
     fn it_displays_year() {
         let mut mock = MockShift::new();
-        let mut sep1 = FakePin::new();
-        let mut sep2 = FakePin::new();
+        let recorder = Recorder::new();
+        let mut sep1 = recorder.create_pin(0);
+        let mut sep2 = recorder.create_pin(1);
 
         let mut display = NixieDisplay::new(&mut mock, &mut sep1, &mut sep2);
 
