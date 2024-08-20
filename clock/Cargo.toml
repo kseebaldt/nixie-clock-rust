@@ -36,6 +36,9 @@ anyhow = "1.0.86"
 toml-cfg = "=0.2.0"
 chrono = "0.4.38"
 chrono-tz = { version = "0.9", features = [ "filter-by-regex" ] }
+serde = { version = "1.0", features = ["derive"] }
+postcard = "1.0"
+serde_json = "1.0"
 drivers        = { path = "../drivers" }
 
 [build-dependencies]
