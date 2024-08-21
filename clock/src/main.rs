@@ -6,15 +6,24 @@ use anyhow::Result;
 use chrono::Utc;
 use chrono_tz::Tz;
 
-use drivers::{nixie_display::NixieDisplay, shift_register::ShiftRegister, storage::{InMemoryStorage, Storage}};
-use embedded_svc::http::Method;
+use embedded_svc::{
+    http::{Headers, Method},
+    io::{Read, Write},
+};
+
+use drivers::{
+    nixie_display::NixieDisplay,
+    shift_register::ShiftRegister,
+    storage::{InMemoryStorage, Storage},
+};
 use esp_idf_svc::hal::{gpio::*, modem::Modem, prelude::*};
 use esp_idf_svc::http::server::EspHttpServer;
-use esp_idf_svc::io::Write;
 use esp_idf_svc::nvs::EspCustomNvsPartition;
 use nixie_clock_rust::storage::NvsStorage;
-use serde::{Deserialize, Serialize};
 use postcard::{from_bytes, to_vec};
+use serde::{Deserialize, Serialize};
+
+const MAX_LEN: usize = 256;
 
 #[toml_cfg::toml_config]
 pub struct WifiConfig {
@@ -120,9 +129,8 @@ fn main() -> Result<()> {
     })?;
 
     let storage2 = storage.clone();
-    server.fn_handler("/config", Method::Get, move |req
-    | {
-        let mut buf:[u8; 256] = [0; 256];
+    server.fn_handler("/config", Method::Get, move |req| {
+        let mut buf: [u8; MAX_LEN] = [0; MAX_LEN];
         let s = storage2.lock().unwrap();
         let config = match s.get_raw("config", &mut buf) {
             Ok(Some(v)) => from_bytes::<Config>(v).unwrap(),
@@ -130,9 +138,47 @@ fn main() -> Result<()> {
         };
         let j = serde_json::to_string(&config).unwrap();
 
-        req.into_ok_response()?
+        req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
             .write_all(j.as_bytes())
             .map(|_| ())
+    })?;
+
+    let storage3 = storage.clone();
+    server.fn_handler::<anyhow::Error, _>("/config", Method::Post, move |mut req| {
+        let len = req.content_len().unwrap_or(0) as usize;
+        let mut s = storage3.lock().unwrap();
+
+        if len > MAX_LEN {
+            req.into_status_response(413)?
+                .write_all("Request too big".as_bytes())?;
+            return Ok(());
+        }
+
+        let mut buf = vec![0; len];
+        req.read_exact(&mut buf)?;
+
+        if let Ok(config) = serde_json::from_slice::<Config>(&buf) {
+            info!("Config: {:?}", config);
+
+            match s.set_raw(
+                "config",
+                &to_vec::<Config, 100>(&config).unwrap(),
+            ) {
+                Ok(_) => {
+                    req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
+                    .write_all("{{\"status\":\"ok\"}}".as_bytes())?;    
+                },
+                Err(_) => {
+                    req.into_status_response(500)?
+                    .write_all("JSON error".as_bytes())?;
+                },
+            };
+        } else {
+            req.into_status_response(500)?
+                .write_all("JSON error".as_bytes())?;
+        }
+
+        Ok(())
     })?;
 
     loop {
