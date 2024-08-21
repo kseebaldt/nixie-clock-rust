@@ -10,6 +10,9 @@ rust-version = "1.77"
 name = "nixie-clock-rust"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
+[lib]
+harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
+
 [profile.release]
 opt-level = "s"
 
