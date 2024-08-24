@@ -12,6 +12,7 @@ use embedded_svc::{
 };
 
 use drivers::{
+    config::{Config, ConfigStorage},
     nixie_display::NixieDisplay,
     shift_register::ShiftRegister,
     storage::{InMemoryStorage, Storage},
@@ -20,38 +21,8 @@ use esp_idf_svc::hal::{gpio::*, modem::Modem, prelude::*};
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::nvs::EspCustomNvsPartition;
 use nixie_clock_rust::storage::NvsStorage;
-use postcard::{from_bytes, to_vec};
-use serde::{Deserialize, Serialize};
 
 const MAX_LEN: usize = 256;
-
-#[toml_cfg::toml_config]
-pub struct WifiConfig {
-    #[default("Wokwi-GUEST")]
-    wifi_ssid: &'static str,
-    #[default("")]
-    wifi_pass: &'static str,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct Config<'a> {
-    wifi_ssid: &'a str,
-    wifi_pass: &'a str,
-    tz: &'a str,
-    led_color: u32,
-}
-
-impl Default for Config<'_> {
-    fn default() -> Self {
-        let wifi_config = WIFI_CONFIG;
-        Config {
-            wifi_ssid: &wifi_config.wifi_ssid,
-            wifi_pass: &wifi_config.wifi_pass,
-            tz: "America/Chicago",
-            led_color: 0x00000088,
-        }
-    }
-}
 
 use log::info;
 use nixie_clock_rust::rgb_led::RgbLed;
@@ -74,10 +45,12 @@ fn main() -> Result<()> {
     let modem = peripherals.modem;
     let ledc = peripherals.ledc;
 
-    let storage: Arc<Mutex<dyn Storage + Send>> = match EspCustomNvsPartition::take("config") {
-        Ok(partition) => Arc::new(Mutex::new(NvsStorage::new(partition, "storage")?)),
-        Err(_) => Arc::new(Mutex::new(InMemoryStorage::new())),
+    let storage: Box<dyn Storage + Send> = match EspCustomNvsPartition::take("config") {
+        Ok(partition) => Box::new(NvsStorage::new(partition, "storage")?),
+        Err(_) => Box::new(InMemoryStorage::new()),
     };
+
+    let config_storage = Arc::new(Mutex::new(ConfigStorage::new(storage)));
 
     // Create the shift register
     let mut data_pin = PinDriver::output(pins.gpio16)?;
@@ -128,14 +101,10 @@ fn main() -> Result<()> {
             .map(|_| ())
     })?;
 
-    let storage2 = storage.clone();
+    let storage2 = config_storage.clone();
     server.fn_handler("/config", Method::Get, move |req| {
-        let mut buf: [u8; MAX_LEN] = [0; MAX_LEN];
-        let s = storage2.lock().unwrap();
-        let config = match s.get_raw("config", &mut buf) {
-            Ok(Some(v)) => from_bytes::<Config>(v).unwrap(),
-            _ => Config::default(),
-        };
+        let mut s = storage2.lock().unwrap();
+        let config = s.load().unwrap();
         let j = serde_json::to_string(&config).unwrap();
 
         req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
@@ -143,7 +112,7 @@ fn main() -> Result<()> {
             .map(|_| ())
     })?;
 
-    let storage3 = storage.clone();
+    let storage3 = config_storage.clone();
     server.fn_handler::<anyhow::Error, _>("/config", Method::Post, move |mut req| {
         let len = req.content_len().unwrap_or(0) as usize;
         let mut s = storage3.lock().unwrap();
@@ -160,10 +129,7 @@ fn main() -> Result<()> {
         if let Ok(config) = serde_json::from_slice::<Config>(&buf) {
             info!("Config: {:?}", config);
 
-            match s.set_raw(
-                "config",
-                &to_vec::<Config, 100>(&config).unwrap(),
-            ) {
+            match s.save(&config) {
                 Ok(_) => {
                     req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
                     .write_all("{{\"status\":\"ok\"}}".as_bytes())?;    
@@ -203,9 +169,10 @@ fn wifi_create(modem: Modem, app_config: &Config) -> Result<esp_idf_svc::wifi::E
     let mut esp_wifi = EspWifi::new(modem, sys_loop.clone(), Some(nvs.clone()))?;
     let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone())?;
 
+    info!("Configuring wifi with SSID: {}", app_config.wifi_ssid());
     wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: app_config.wifi_ssid.try_into().unwrap(),
-        password: app_config.wifi_pass.try_into().unwrap(),
+        ssid: app_config.wifi_ssid().try_into().unwrap(),
+        password: app_config.wifi_pass().try_into().unwrap(),
         auth_method: AuthMethod::None,
         ..Default::default()
     }))?;

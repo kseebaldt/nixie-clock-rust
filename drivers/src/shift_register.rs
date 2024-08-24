@@ -49,7 +49,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
     use super::*;
     use testing::digital::{FakePin, Recorder};
     use std::vec;
