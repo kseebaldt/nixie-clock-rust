@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use thiserror::Error;
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-#[non_exhaustive]
+#[derive(Error, Debug)]
 pub enum StorageError {
+    #[error("error reading from storage")]
     ReadError,
+    #[error("error writing to storage")]
     WriteError,
 }
 
@@ -24,6 +26,12 @@ impl InMemoryStorage {
     }
 }
 
+impl Default for InMemoryStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Storage for InMemoryStorage {
     fn set_raw(&mut self, name: &str, buf: &[u8]) -> Result<bool, StorageError> {
         self.storage.insert(name.to_string(), buf.to_vec());
@@ -33,12 +41,16 @@ impl Storage for InMemoryStorage {
     fn get_raw<'a>(&self, name: &str, buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, StorageError> {
         match self.storage.get(name) {
             Some(v) => {
-                if buf.len() == v.len() {
-                    buf.copy_from_slice(v);
-                } else if buf.len() > v.len() {
-                    buf[..v.len()].copy_from_slice(v);
-                } else {
-                    buf.copy_from_slice(&v[..buf.len()]);
+                match buf.len().cmp(&v.len()) {
+                    std::cmp::Ordering::Equal => {
+                        buf.copy_from_slice(v);
+                    }
+                    std::cmp::Ordering::Greater => {
+                        buf[..v.len()].copy_from_slice(v);
+                    }
+                    std::cmp::Ordering::Less => {
+                        buf.copy_from_slice(&v[..buf.len()]);
+                    }
                 }
                 Ok(Some(buf))
             }

@@ -71,7 +71,7 @@ impl ConfigStorage {
         }
     }
 
-    pub fn load(&mut self) -> Result<Config, ()> {
+    pub fn load(&mut self) -> Result<Config, StorageError> {
         if let Some(ref config) = self.config {
             return Ok(config.clone());
         }
@@ -88,8 +88,9 @@ impl ConfigStorage {
 
     pub fn save(&mut self, config: &Config) -> Result<(), StorageError> {
         self.storage
-            .set_raw("config", &to_vec::<Config, 100>(&config).unwrap())?;
+            .set_raw("config", &to_vec::<Config, 100>(config).unwrap())?;
 
+        self.config = Some(config.clone());
         Ok(())
     }
 }
@@ -114,6 +115,20 @@ mod tests {
     fn it_loads_previously_saved_config() {
         let storage = InMemoryStorage::new();
         let mut config_storage = ConfigStorage::new(Box::new(storage));
+
+        let config = Config::new("ssid", "pass", "America/Chicago", 0x12345678);
+        config_storage.save(&config).unwrap();
+
+        assert_eq!(config, config_storage.load().unwrap());
+    }
+
+    #[test]
+    fn it_updates_cache_on_save() {
+        let storage = InMemoryStorage::new();
+        let mut config_storage = ConfigStorage::new(Box::new(storage));
+
+        let config = config_storage.load().unwrap();
+        assert_eq!(config, Config::default());
 
         let config = Config::new("ssid", "pass", "America/Chicago", 0x12345678);
         config_storage.save(&config).unwrap();

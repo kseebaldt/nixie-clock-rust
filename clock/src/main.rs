@@ -1,13 +1,11 @@
 use esp_idf_svc::sntp;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
-
 use chrono::Utc;
 use chrono_tz::Tz;
 
 use drivers::{
-    config::{Config, ConfigStorage},
+    config::ConfigStorage,
     nixie_display::NixieDisplay,
     shift_register::ShiftRegister,
     storage::{InMemoryStorage, Storage},
@@ -21,7 +19,7 @@ use nixie_clock_rust::rgb_led::RgbLed;
 use nixie_clock_rust::server::create_server;
 use nixie_clock_rust::wifi::wifi_create;
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
     esp_idf_svc::sys::link_patches();
@@ -62,7 +60,7 @@ fn main() -> Result<()> {
     rgb.set_color(0x00000088)?;
 
     // Keep it around or else the wifi will stop
-    let app_config = Config::default();
+    let app_config = config_storage.lock().unwrap().load()?;
     let _wifi = wifi_create(modem, &app_config)?;
 
     // Keep it around or else the SNTP service will stop
@@ -72,7 +70,7 @@ fn main() -> Result<()> {
     let tz: Tz = "America/Chicago".parse().unwrap();
     info!("Time Zone: {:?}", tz);
 
-    create_server(config_storage)?;
+    let _server = create_server(config_storage)?;
 
     loop {
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates

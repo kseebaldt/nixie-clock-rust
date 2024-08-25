@@ -15,7 +15,9 @@ const STACK_SIZE: usize = 10240;
 const MAX_LEN: usize = 256;
 static INDEX_HTML: &str = include_str!("../../webapp/dist/index.html");
 
-pub fn create_server(config_storage: Arc<Mutex<ConfigStorage>>) -> Result<(), anyhow::Error> {
+pub fn create_server(
+    config_storage: Arc<Mutex<ConfigStorage>>,
+) -> Result<EspHttpServer<'static>, anyhow::Error> {
     let server_configuration = esp_idf_svc::http::server::Configuration {
         stack_size: STACK_SIZE,
         ..Default::default()
@@ -70,5 +72,5 @@ pub fn create_server(config_storage: Arc<Mutex<ConfigStorage>>) -> Result<(), an
 
         Ok(())
     })?;
-    Ok(())
+    Ok(server)
 }
