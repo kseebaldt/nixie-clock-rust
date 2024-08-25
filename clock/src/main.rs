@@ -5,7 +5,7 @@ use chrono::Utc;
 use chrono_tz::Tz;
 
 use drivers::{
-    config::ConfigStorage,
+    config::{ConfigStorage, DEFAULT_CONFIG},
     nixie_display::NixieDisplay,
     shift_register::ShiftRegister,
     storage::{InMemoryStorage, Storage},
@@ -61,8 +61,9 @@ fn main() -> anyhow::Result<()> {
     info!("Setting led color to: #{:06x}", app_config.led_color());
     rgb.set_color(app_config.led_color())?;
 
+    let default_config = DEFAULT_CONFIG;
     // Keep it around or else the wifi will stop
-    let _wifi = wifi_create(modem, &app_config)?;
+    let _wifi = wifi_create(modem, &app_config, &default_config)?;
 
     // Keep it around or else the SNTP service will stop
     let _sntp = sntp::EspSntp::new_default()?;

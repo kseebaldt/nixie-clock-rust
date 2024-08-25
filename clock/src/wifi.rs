@@ -1,11 +1,14 @@
 use anyhow::Result;
 
-use drivers::config::InternalConfig;
+use drivers::config::{DefaultConfig, InternalConfig};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::modem::Modem,
     nvs::EspDefaultNvsPartition,
-    wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi},
+    wifi::{
+        AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration,
+        EspWifi,
+    },
 };
 
 use log::info;
@@ -13,6 +16,7 @@ use log::info;
 pub fn wifi_create(
     modem: Modem,
     app_config: &InternalConfig,
+    default_config: &DefaultConfig,
 ) -> Result<esp_idf_svc::wifi::EspWifi<'static>> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
@@ -21,12 +25,23 @@ pub fn wifi_create(
     let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone())?;
 
     info!("Configuring wifi with SSID: {}", app_config.wifi_ssid());
-    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: app_config.wifi_ssid().try_into().unwrap(),
-        password: app_config.wifi_pass().try_into().unwrap(),
-        auth_method: AuthMethod::None,
-        ..Default::default()
-    }))?;
+    info!(
+        "Configuring access point with SSID: {} Pass: {}",
+        default_config.ap_ssid, default_config.ap_pass
+    );
+    wifi.set_configuration(&Configuration::Mixed(
+        ClientConfiguration {
+            ssid: app_config.wifi_ssid().try_into().unwrap(),
+            password: app_config.wifi_pass().try_into().unwrap(),
+            auth_method: AuthMethod::None,
+            ..Default::default()
+        },
+        AccessPointConfiguration {
+            ssid: default_config.ap_ssid.try_into().unwrap(),
+            password: default_config.ap_pass.try_into().unwrap(),
+            ..Default::default()
+        },
+    ))?;
 
     wifi.start()?;
     info!("Wifi started");

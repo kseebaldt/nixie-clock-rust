@@ -5,11 +5,15 @@ use validator::{Validate, ValidationError};
 use crate::storage::{Storage, StorageError};
 
 #[toml_cfg::toml_config]
-struct WifiConfig {
+struct DefaultConfig {
     #[default("Wokwi-GUEST")]
     wifi_ssid: &'static str,
     #[default("")]
     wifi_pass: &'static str,
+    #[default("nixie-clock")]
+    ap_ssid: &'static str,
+    #[default("")]
+    ap_pass: &'static str,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -22,7 +26,7 @@ pub struct InternalConfig {
 
 impl Default for InternalConfig {
     fn default() -> Self {
-        let wifi_config = WIFI_CONFIG;
+        let wifi_config = DEFAULT_CONFIG;
         InternalConfig::new(
             wifi_config.wifi_ssid,
             wifi_config.wifi_pass,
