@@ -8,56 +8,38 @@ pub struct RgbLed<'a> {
 }
 
 impl<'d> RgbLed<'d> {
-    pub fn new<C1, C2, C3, T1, T2, T3>(
-        red_channel: impl Peripheral<P = C1> + 'd,
-        red_timer: impl Peripheral<P = T1> + 'd,
-        red_pin: impl Peripheral<P = impl OutputPin> + 'd,
-        green_channel: impl Peripheral<P = C2> + 'd,
-        green_timer: impl Peripheral<P = T2> + 'd,
-        green_pin: impl Peripheral<P = impl OutputPin> + 'd,
-        blue_channel: impl Peripheral<P = C3> + 'd,
-        blue_timer: impl Peripheral<P = T3> + 'd,
-        blue_pin: impl Peripheral<P = impl OutputPin> + 'd,
-    ) -> Result<Self, EspError> 
+    pub fn create_driver<C, T>(
+        channel: impl Peripheral<P = C> + 'd,
+        timer: impl Peripheral<P = T> + 'd,
+        pin: impl Peripheral<P = impl OutputPin> + 'd,
+    ) -> Result<LedcDriver<'d>, EspError>
     where
-    C1: LedcChannel<SpeedMode = <T1 as LedcTimer>::SpeedMode>,
-    C2: LedcChannel<SpeedMode = <T2 as LedcTimer>::SpeedMode>,
-    C3: LedcChannel<SpeedMode = <T3 as LedcTimer>::SpeedMode>,
-    T1: LedcTimer + 'd,
-    T2: LedcTimer + 'd,
-    T3: LedcTimer + 'd
+        C: LedcChannel<SpeedMode = <T as LedcTimer>::SpeedMode>,
+        T: LedcTimer + 'd,
     {
-        let red = LedcDriver::new(
-            red_channel,
-            LedcTimerDriver::new(
-                red_timer,
-                &config::TimerConfig::new().frequency(5.kHz().into()),
-            )?,
-            red_pin,
+        let driver = LedcDriver::new(
+            channel,
+            LedcTimerDriver::new(timer, &config::TimerConfig::new().frequency(5.kHz().into()))?,
+            pin,
         )?;
-        let green = LedcDriver::new(
-            green_channel,
-            LedcTimerDriver::new(
-                green_timer,
-                &config::TimerConfig::new().frequency(5.kHz().into()),
-            )?,
-            green_pin,
-        )?;
-        let blue = LedcDriver::new(
-            blue_channel,
-            LedcTimerDriver::new(
-                blue_timer,
-                &config::TimerConfig::new().frequency(5.kHz().into()),
-            )?,
-            blue_pin,
-        )?;
+        Ok(driver)
+    }
+
+    pub fn new(
+        red: LedcDriver<'d>,
+        green: LedcDriver<'d>,
+        blue: LedcDriver<'d>,
+    ) -> Result<Self, EspError> {
         Ok(Self { red, green, blue })
     }
 
     pub fn set_rgb(&mut self, r: u8, g: u8, b: u8) -> Result<(), EspError> {
-        self.red.set_duty(self.red.get_max_duty() * (r as u32) / 256)?;
-        self.green.set_duty(self.green.get_max_duty() * (g as u32) / 256)?;
-        self.blue.set_duty(self.blue.get_max_duty() * (b as u32) / 256)?;
+        self.red
+            .set_duty(self.red.get_max_duty() * (r as u32) / 256)?;
+        self.green
+            .set_duty(self.green.get_max_duty() * (g as u32) / 256)?;
+        self.blue
+            .set_duty(self.blue.get_max_duty() * (b as u32) / 256)?;
 
         Ok(())
     }

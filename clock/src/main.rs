@@ -6,11 +6,6 @@ use anyhow::Result;
 use chrono::Utc;
 use chrono_tz::Tz;
 
-use embedded_svc::{
-    http::{Headers, Method},
-    io::{Read, Write},
-};
-
 use drivers::{
     config::{Config, ConfigStorage},
     nixie_display::NixieDisplay,
@@ -18,18 +13,13 @@ use drivers::{
     storage::{InMemoryStorage, Storage},
 };
 use esp_idf_svc::hal::{gpio::*, prelude::*};
-use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::nvs::EspCustomNvsPartition;
 use nixie_clock_rust::storage::NvsStorage;
 
-const MAX_LEN: usize = 256;
-
 use log::info;
 use nixie_clock_rust::rgb_led::RgbLed;
+use nixie_clock_rust::server::create_server;
 use nixie_clock_rust::wifi::wifi_create;
-
-const STACK_SIZE: usize = 10240;
-static INDEX_HTML: &str = include_str!("../../webapp/dist/index.html");
 
 fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -60,20 +50,13 @@ fn main() -> Result<()> {
     let mut seperator1 = PinDriver::output(pins.gpio4)?;
     let mut seperator2 = PinDriver::output(pins.gpio2)?;
 
-    let mut sr = ShiftRegister::new(&mut data_pin, &mut clock_pin, &mut latch_pin);
-
-    let mut display = NixieDisplay::new(&mut sr, &mut seperator1, &mut seperator2);
+    let mut shift_register = ShiftRegister::new(&mut data_pin, &mut clock_pin, &mut latch_pin);
+    let mut display = NixieDisplay::new(&mut shift_register, &mut seperator1, &mut seperator2);
 
     let mut rgb = RgbLed::new(
-        ledc.channel0,
-        ledc.timer0,
-        pins.gpio25,
-        ledc.channel1,
-        ledc.timer1,
-        pins.gpio26,
-        ledc.channel2,
-        ledc.timer2,
-        pins.gpio27,
+        RgbLed::create_driver(ledc.channel0, ledc.timer0, pins.gpio25)?,
+        RgbLed::create_driver(ledc.channel1, ledc.timer1, pins.gpio26)?,
+        RgbLed::create_driver(ledc.channel2, ledc.timer2, pins.gpio27)?,
     )?;
 
     rgb.set_color(0x00000088)?;
@@ -89,64 +72,7 @@ fn main() -> Result<()> {
     let tz: Tz = "America/Chicago".parse().unwrap();
     info!("Time Zone: {:?}", tz);
 
-    let server_configuration = esp_idf_svc::http::server::Configuration {
-        stack_size: STACK_SIZE,
-        ..Default::default()
-    };
-
-    let mut server = EspHttpServer::new(&server_configuration)?;
-
-    server.fn_handler("/", Method::Get, |req| {
-        req.into_ok_response()?
-            .write_all(INDEX_HTML.as_bytes())
-            .map(|_| ())
-    })?;
-
-    let storage2 = config_storage.clone();
-    server.fn_handler("/config", Method::Get, move |req| {
-        let mut s = storage2.lock().unwrap();
-        let config = s.load().unwrap();
-        let j = serde_json::to_string(&config).unwrap();
-
-        req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
-            .write_all(j.as_bytes())
-            .map(|_| ())
-    })?;
-
-    let storage3 = config_storage.clone();
-    server.fn_handler::<anyhow::Error, _>("/config", Method::Post, move |mut req| {
-        let len = req.content_len().unwrap_or(0) as usize;
-        let mut s = storage3.lock().unwrap();
-
-        if len > MAX_LEN {
-            req.into_status_response(413)?
-                .write_all("Request too big".as_bytes())?;
-            return Ok(());
-        }
-
-        let mut buf = vec![0; len];
-        req.read_exact(&mut buf)?;
-
-        if let Ok(config) = serde_json::from_slice::<Config>(&buf) {
-            info!("Config: {:?}", config);
-
-            match s.save(&config) {
-                Ok(_) => {
-                    req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
-                        .write_all("{{\"status\":\"ok\"}}".as_bytes())?;
-                }
-                Err(_) => {
-                    req.into_status_response(500)?
-                        .write_all("JSON error".as_bytes())?;
-                }
-            };
-        } else {
-            req.into_status_response(500)?
-                .write_all("JSON error".as_bytes())?;
-        }
-
-        Ok(())
-    })?;
+    create_server(config_storage)?;
 
     loop {
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates
