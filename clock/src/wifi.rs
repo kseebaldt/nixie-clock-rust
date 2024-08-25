@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use drivers::config::Config;
+use drivers::config::InternalConfig;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::modem::Modem,
@@ -12,7 +12,7 @@ use log::info;
 
 pub fn wifi_create(
     modem: Modem,
-    app_config: &Config,
+    app_config: &InternalConfig,
 ) -> Result<esp_idf_svc::wifi::EspWifi<'static>> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;

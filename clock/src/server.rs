@@ -6,7 +6,7 @@ use embedded_svc::{
     io::{Read, Write},
 };
 
-use drivers::config::{Config, ConfigStorage};
+use drivers::config::{Config, ConfigStorage, InternalConfig};
 use esp_idf_svc::http::server::EspHttpServer;
 
 use log::info;
@@ -32,7 +32,7 @@ pub fn create_server(
     server.fn_handler("/config", Method::Get, move |req| {
         let mut s = storage2.lock().unwrap();
         let config = s.load().unwrap();
-        let j = serde_json::to_string(&config).unwrap();
+        let j = serde_json::to_string(&Config::from(config)).unwrap();
 
         req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
             .write_all(j.as_bytes())
@@ -55,19 +55,30 @@ pub fn create_server(
         if let Ok(config) = serde_json::from_slice::<Config>(&buf) {
             info!("Config: {:?}", config);
 
-            match s.save(&config) {
+            match config.validate() {
                 Ok(_) => {
-                    req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
-                        .write_all("{{\"status\":\"ok\"}}".as_bytes())?;
+                    match s.save(&InternalConfig::from(config)) {
+                        Ok(_) => {
+                            req.into_response(
+                                200,
+                                Some("OK"),
+                                &[("Content-Type", "application/json")],
+                            )?
+                            .write_all("{{\"status\":\"ok\"}}".as_bytes())?;
+                        }
+                        Err(_) => {
+                            req.into_status_response(500)?;
+                        }
+                    };
                 }
-                Err(_) => {
-                    req.into_status_response(500)?
-                        .write_all("JSON error".as_bytes())?;
+                Err(e) => {
+                    let j = serde_json::to_string(&e).unwrap();
+                    req.into_status_response(400)?.write_all(j.as_bytes())?;
+                    return Ok(());
                 }
-            };
+            }
         } else {
-            req.into_status_response(500)?
-                .write_all("JSON error".as_bytes())?;
+            req.into_status_response(400)?;
         }
 
         Ok(())

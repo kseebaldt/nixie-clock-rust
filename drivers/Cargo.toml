@@ -11,6 +11,7 @@ chrono = "0.4.38"
 postcard = "1.0"
 thiserror = "1.0.63"
 toml-cfg = "=0.2.0"
+validator = { version = "0.18", features = ["derive"] }
 
 [dev-dependencies]
 testing        = { path = "../testing" }
