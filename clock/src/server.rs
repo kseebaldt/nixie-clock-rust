@@ -64,7 +64,7 @@ pub fn create_server(
                                 Some("OK"),
                                 &[("Content-Type", "application/json")],
                             )?
-                            .write_all("{{\"status\":\"ok\"}}".as_bytes())?;
+                            .write_all("{\"status\":\"ok\"}".as_bytes())?;
                         }
                         Err(_) => {
                             req.into_status_response(500)?;

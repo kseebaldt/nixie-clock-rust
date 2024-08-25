@@ -57,10 +57,11 @@ fn main() -> anyhow::Result<()> {
         RgbLed::create_driver(ledc.channel2, ledc.timer2, pins.gpio27)?,
     )?;
 
-    rgb.set_color(0x00000088)?;
+    let app_config = config_storage.lock().unwrap().load()?;
+    info!("Setting led color to: #{:06x}", app_config.led_color());
+    rgb.set_color(app_config.led_color())?;
 
     // Keep it around or else the wifi will stop
-    let app_config = config_storage.lock().unwrap().load()?;
     let _wifi = wifi_create(modem, &app_config)?;
 
     // Keep it around or else the SNTP service will stop
