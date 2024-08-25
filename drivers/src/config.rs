@@ -22,7 +22,12 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         let wifi_config = WIFI_CONFIG;
-        Config::new(wifi_config.wifi_ssid, wifi_config.wifi_pass, "America/Chicago", 0x00000088)
+        Config::new(
+            wifi_config.wifi_ssid,
+            wifi_config.wifi_pass,
+            "America/Chicago",
+            0x00000088,
+        )
     }
 }
 
@@ -55,12 +60,15 @@ impl Config {
 
 pub struct ConfigStorage {
     storage: Box<dyn Storage + Send>,
-    config: Option<Config>
+    config: Option<Config>,
 }
 
 impl ConfigStorage {
     pub fn new(storage: Box<dyn Storage + Send>) -> Self {
-        ConfigStorage { storage, config: None }
+        ConfigStorage {
+            storage,
+            config: None,
+        }
     }
 
     pub fn load(&mut self) -> Result<Config, ()> {
@@ -79,10 +87,8 @@ impl ConfigStorage {
     }
 
     pub fn save(&mut self, config: &Config) -> Result<(), StorageError> {
-        self.storage.set_raw(
-            "config",
-            &to_vec::<Config, 100>(&config).unwrap(),
-        )?;
+        self.storage
+            .set_raw("config", &to_vec::<Config, 100>(&config).unwrap())?;
 
         Ok(())
     }

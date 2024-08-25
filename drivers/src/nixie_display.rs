@@ -5,7 +5,7 @@ use hal::digital::OutputPin;
 pub enum DisplayMode {
     Time,
     Date,
-    Year
+    Year,
 }
 
 pub struct NixieDisplay<'a, T, Pin1, Pin2> {
@@ -16,9 +16,18 @@ pub struct NixieDisplay<'a, T, Pin1, Pin2> {
 }
 
 impl<'a, T, Pin1, Pin2> NixieDisplay<'a, T, Pin1, Pin2>
-where T: Shift, Pin1: OutputPin, Pin2: OutputPin {
+where
+    T: Shift,
+    Pin1: OutputPin,
+    Pin2: OutputPin,
+{
     pub fn new(shift_register: &'a mut T, seperator1: Pin1, seperator2: Pin2) -> Self {
-        Self { shift_register, seperator1, seperator2, mode: DisplayMode::Time }
+        Self {
+            shift_register,
+            seperator1,
+            seperator2,
+            mode: DisplayMode::Time,
+        }
     }
 
     pub fn set_mode(&mut self, mode: DisplayMode) {
@@ -59,7 +68,6 @@ where T: Shift, Pin1: OutputPin, Pin2: OutputPin {
             self.seperator2.set_low().unwrap();
         }
     }
-
 
     pub fn display_date(&mut self, time: impl Datelike) {
         let month = time.month();
@@ -105,9 +113,9 @@ where T: Shift, Pin1: OutputPin, Pin2: OutputPin {
 
 #[cfg(test)]
 mod tests {
-    use std::vec::Vec;
-    use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
+    use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
     use hal::digital::PinState;
+    use std::vec::Vec;
     use testing::digital::Recorder;
 
     use super::*;

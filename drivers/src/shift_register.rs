@@ -50,8 +50,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use testing::digital::{FakePin, Recorder};
     use std::vec;
+    use testing::digital::{FakePin, Recorder};
 
     #[test]
     fn it_works() {
@@ -73,67 +73,51 @@ mod tests {
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::High),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::High),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::High),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::High),
                 (2, PinState::High),
                 (2, PinState::Low),
-
                 (1, PinState::Low),
                 (2, PinState::High),
-                (2, PinState::Low),                
-
+                (2, PinState::Low),
                 (3, PinState::High),
                 (3, PinState::Low)
             ]

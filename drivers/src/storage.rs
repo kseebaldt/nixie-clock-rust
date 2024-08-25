@@ -33,9 +33,9 @@ impl Storage for InMemoryStorage {
     fn get_raw<'a>(&self, name: &str, buf: &'a mut [u8]) -> Result<Option<&'a [u8]>, StorageError> {
         match self.storage.get(name) {
             Some(v) => {
-                if buf.len() == v.len(){
+                if buf.len() == v.len() {
                     buf.copy_from_slice(v);
-                } else if buf.len() > v.len(){
+                } else if buf.len() > v.len() {
                     buf[..v.len()].copy_from_slice(v);
                 } else {
                     buf.copy_from_slice(&v[..buf.len()]);
@@ -50,8 +50,8 @@ impl Storage for InMemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Deserialize, Serialize};
     use postcard::{from_bytes, to_vec};
+    use serde::{Deserialize, Serialize};
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct TestStruct<'a> {
@@ -66,14 +66,15 @@ mod tests {
 
         let value: [u8; 3] = [1, 2, 3];
 
-
-        let mut buf:[u8; 64] = [0; 64];
+        let mut buf: [u8; 64] = [0; 64];
 
         storage.set_raw("test", &value).unwrap();
 
-        assert_eq!(storage.get_raw("test", &mut buf).unwrap().unwrap()[..3], value);
+        assert_eq!(
+            storage.get_raw("test", &mut buf).unwrap().unwrap()[..3],
+            value
+        );
     }
-
 
     #[test]
     fn test_serde() {
@@ -85,16 +86,15 @@ mod tests {
             a_number: 42,
         };
 
-        storage.set_raw(
-            "test",
-            &to_vec::<TestStruct, 100>(&my_struct).unwrap(),
-        ).unwrap();
+        storage
+            .set_raw("test", &to_vec::<TestStruct, 100>(&my_struct).unwrap())
+            .unwrap();
 
         let buf: &mut [u8] = &mut [0; 100];
-    
+
         let raw = storage.get_raw("test", buf).unwrap().unwrap();
         let value = from_bytes::<TestStruct>(raw).unwrap();
-        
+
         assert_eq!(my_struct, value);
     }
 }

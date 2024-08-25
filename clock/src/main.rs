@@ -17,7 +17,7 @@ use drivers::{
     shift_register::ShiftRegister,
     storage::{InMemoryStorage, Storage},
 };
-use esp_idf_svc::hal::{gpio::*, modem::Modem, prelude::*};
+use esp_idf_svc::hal::{gpio::*, prelude::*};
 use esp_idf_svc::http::server::EspHttpServer;
 use esp_idf_svc::nvs::EspCustomNvsPartition;
 use nixie_clock_rust::storage::NvsStorage;
@@ -26,6 +26,7 @@ const MAX_LEN: usize = 256;
 
 use log::info;
 use nixie_clock_rust::rgb_led::RgbLed;
+use nixie_clock_rust::wifi::wifi_create;
 
 const STACK_SIZE: usize = 10240;
 static INDEX_HTML: &str = include_str!("../../webapp/dist/index.html");
@@ -132,12 +133,12 @@ fn main() -> Result<()> {
             match s.save(&config) {
                 Ok(_) => {
                     req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?
-                    .write_all("{{\"status\":\"ok\"}}".as_bytes())?;    
-                },
+                        .write_all("{{\"status\":\"ok\"}}".as_bytes())?;
+                }
                 Err(_) => {
                     req.into_status_response(500)?
-                    .write_all("JSON error".as_bytes())?;
-                },
+                        .write_all("JSON error".as_bytes())?;
+                }
             };
         } else {
             req.into_status_response(500)?
@@ -156,35 +157,4 @@ fn main() -> Result<()> {
 
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
-}
-
-fn wifi_create(modem: Modem, app_config: &Config) -> Result<esp_idf_svc::wifi::EspWifi<'static>> {
-    use esp_idf_svc::eventloop::*;
-    use esp_idf_svc::nvs::*;
-    use esp_idf_svc::wifi::*;
-
-    let sys_loop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
-
-    let mut esp_wifi = EspWifi::new(modem, sys_loop.clone(), Some(nvs.clone()))?;
-    let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone())?;
-
-    info!("Configuring wifi with SSID: {}", app_config.wifi_ssid());
-    wifi.set_configuration(&Configuration::Client(ClientConfiguration {
-        ssid: app_config.wifi_ssid().try_into().unwrap(),
-        password: app_config.wifi_pass().try_into().unwrap(),
-        auth_method: AuthMethod::None,
-        ..Default::default()
-    }))?;
-
-    wifi.start()?;
-    info!("Wifi started");
-
-    wifi.connect()?;
-    info!("Wifi connected");
-
-    wifi.wait_netif_up()?;
-    info!("Wifi netif up");
-
-    Ok(esp_wifi)
 }
