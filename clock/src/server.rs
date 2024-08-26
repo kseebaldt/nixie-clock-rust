@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc::Sender, Arc, Mutex};
 
 use anyhow::Result;
 use embedded_svc::{
@@ -17,6 +17,7 @@ static INDEX_HTML: &str = include_str!("../../webapp/dist/index.html");
 
 pub fn create_server(
     config_storage: Arc<Mutex<ConfigStorage>>,
+    sender: Sender<InternalConfig>,
 ) -> Result<EspHttpServer<'static>, anyhow::Error> {
     let server_configuration = esp_idf_svc::http::server::Configuration {
         stack_size: STACK_SIZE,
@@ -57,8 +58,10 @@ pub fn create_server(
 
             match config.validate() {
                 Ok(_) => {
-                    match s.save(&InternalConfig::from(config)) {
+                    let internal_config = InternalConfig::from(config);
+                    match s.save(&internal_config) {
                         Ok(_) => {
+                            sender.send(internal_config).unwrap();
                             req.into_response(
                                 200,
                                 Some("OK"),

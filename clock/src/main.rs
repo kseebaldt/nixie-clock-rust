@@ -1,11 +1,11 @@
 use esp_idf_svc::sntp;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc::channel, Arc, Mutex};
 
 use chrono::Utc;
 use chrono_tz::Tz;
 
 use drivers::{
-    config::{ConfigStorage, DEFAULT_CONFIG},
+    config::{ConfigStorage, InternalConfig, DEFAULT_CONFIG},
     nixie_display::NixieDisplay,
     shift_register::ShiftRegister,
     storage::{InMemoryStorage, Storage},
@@ -69,12 +69,21 @@ fn main() -> anyhow::Result<()> {
     let _sntp = sntp::EspSntp::new_default()?;
     info!("SNTP initialized");
 
-    let tz: Tz = "America/Chicago".parse().unwrap();
+    let mut tz: Tz = app_config.tz().parse().unwrap();
     info!("Time Zone: {:?}", tz);
 
-    let _server = create_server(config_storage)?;
+    let (tx, rx) = channel::<InternalConfig>();
+    let _server = create_server(config_storage, tx)?;
 
     loop {
+        match rx.try_recv() {
+            Ok(config) => {
+                info!("Received new config: {:?}", config);
+                rgb.set_color(config.led_color())?;
+                tz = config.tz().parse().unwrap();
+            }
+            _ => {}
+        }
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates
         let local_time = Utc::now().with_timezone(&tz);
         info!("Current time: {:?}", local_time);
