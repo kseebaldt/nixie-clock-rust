@@ -7,6 +7,7 @@ use chrono_tz::Tz;
 use drivers::{
     config::{ConfigStorage, InternalConfig, DEFAULT_CONFIG},
     nixie_display::NixieDisplay,
+    rgb_led::RgbLed,
     shift_register::ShiftRegister,
     storage::{InMemoryStorage, Storage},
 };
@@ -15,7 +16,7 @@ use esp_idf_svc::nvs::EspCustomNvsPartition;
 use nixie_clock_rust::storage::NvsStorage;
 
 use log::info;
-use nixie_clock_rust::rgb_led::RgbLed;
+use nixie_clock_rust::rgb_led::create_driver;
 use nixie_clock_rust::server::create_server;
 use nixie_clock_rust::wifi::wifi_create;
 
@@ -52,10 +53,10 @@ fn main() -> anyhow::Result<()> {
     let mut display = NixieDisplay::new(&mut shift_register, &mut seperator1, &mut seperator2);
 
     let mut rgb = RgbLed::new(
-        RgbLed::create_driver(ledc.channel0, ledc.timer0, pins.gpio25)?,
-        RgbLed::create_driver(ledc.channel1, ledc.timer1, pins.gpio26)?,
-        RgbLed::create_driver(ledc.channel2, ledc.timer2, pins.gpio27)?,
-    )?;
+        create_driver(ledc.channel0, ledc.timer0, pins.gpio27)?,
+        create_driver(ledc.channel1, ledc.timer1, pins.gpio26)?,
+        create_driver(ledc.channel2, ledc.timer2, pins.gpio25)?,
+    );
 
     let app_config = config_storage.lock().unwrap().load()?;
     info!("Setting led color to: #{:06x}", app_config.led_color());
