@@ -13,11 +13,11 @@ impl<T: SetDutyCycle> RgbLed<T> {
 
     pub fn set_rgb(&mut self, r: u8, g: u8, b: u8) -> Result<(), T::Error> {
         self.red
-            .set_duty_cycle_fraction(r as u16, 255)?;
+            .set_duty_cycle_fraction(256 - r as u16, 255)?;
         self.green
-            .set_duty_cycle_fraction(g as u16, 255)?;
+            .set_duty_cycle_fraction(256 - g as u16, 255)?;
         self.blue
-            .set_duty_cycle_fraction(b as u16, 255)?;
+            .set_duty_cycle_fraction(256 - b as u16, 255)?;
 
         Ok(())
     }
