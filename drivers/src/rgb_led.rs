@@ -12,12 +12,9 @@ impl<T: SetDutyCycle> RgbLed<T> {
     }
 
     pub fn set_rgb(&mut self, r: u8, g: u8, b: u8) -> Result<(), T::Error> {
-        self.red
-            .set_duty_cycle_fraction(256 - r as u16, 255)?;
-        self.green
-            .set_duty_cycle_fraction(256 - g as u16, 255)?;
-        self.blue
-            .set_duty_cycle_fraction(256 - b as u16, 255)?;
+        self.red.set_duty_cycle_fraction(255 - r as u16, 255)?;
+        self.green.set_duty_cycle_fraction(255 - g as u16, 255)?;
+        self.blue.set_duty_cycle_fraction(255 - b as u16, 255)?;
 
         Ok(())
     }
@@ -40,10 +37,10 @@ mod tests {
 
     #[derive(Debug)]
     struct FakeError {}
-    
+
     impl hal::pwm::Error for FakeError {
         fn kind(&self) -> hal::pwm::ErrorKind {
-            ErrorKind::Other 
+            ErrorKind::Other
         }
     }
 
@@ -54,12 +51,12 @@ mod tests {
     impl ErrorType for MockLed {
         type Error = FakeError;
     }
-    
+
     impl SetDutyCycle for MockLed {
         fn max_duty_cycle(&self) -> u16 {
             1000
         }
-    
+
         fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
             self.duty = duty;
             Ok(())
@@ -72,19 +69,15 @@ mod tests {
         let green = MockLed { duty: 0 };
         let blue = MockLed { duty: 0 };
 
-        let mut led = RgbLed::new(
-            red,
-            green,
-            blue
-        );
+        let mut led = RgbLed::new(red, green, blue);
 
         let color = 0xFF8040;
 
         led.set_color(color).unwrap();
 
-        assert_eq!(led.red.duty, 1000);
-        assert_eq!(led.green.duty, 501);
-        assert_eq!(led.blue.duty, 250);
+        assert_eq!(led.red.duty, 0);
+        assert_eq!(led.green.duty, 498);
+        assert_eq!(led.blue.duty, 749);
     }
 
     #[test]
@@ -93,19 +86,15 @@ mod tests {
         let green = MockLed { duty: 0 };
         let blue = MockLed { duty: 0 };
 
-        let mut led = RgbLed::new(
-            red,
-            green,
-            blue
-        );
+        let mut led = RgbLed::new(red, green, blue);
 
         let color = 0xFFFFFF;
 
         led.set_color(color).unwrap();
 
-        assert_eq!(led.red.duty, 1000);
-        assert_eq!(led.green.duty, 1000);
-        assert_eq!(led.blue.duty, 1000);
+        assert_eq!(led.red.duty, 0);
+        assert_eq!(led.green.duty, 0);
+        assert_eq!(led.blue.duty, 0);
     }
 
     #[test]
@@ -114,18 +103,14 @@ mod tests {
         let green = MockLed { duty: 0 };
         let blue = MockLed { duty: 0 };
 
-        let mut led = RgbLed::new(
-            red,
-            green,
-            blue
-        );
+        let mut led = RgbLed::new(red, green, blue);
 
         let color = 0x000000;
 
         led.set_color(color).unwrap();
 
-        assert_eq!(led.red.duty, 0);
-        assert_eq!(led.green.duty, 0);
-        assert_eq!(led.blue.duty, 0);
+        assert_eq!(led.red.duty, 1000);
+        assert_eq!(led.green.duty, 1000);
+        assert_eq!(led.blue.duty, 1000);
     }
 }
