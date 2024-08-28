@@ -1,16 +1,21 @@
-use esp_idf_svc::sntp;
-use std::sync::{mpsc::channel, Arc, Mutex};
+use esp_idf_svc::{sntp, timer::EspTaskTimerService};
+use std::{
+    sync::{mpsc::channel, Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::Utc;
 use chrono_tz::Tz;
 
 use drivers::{
     config::{ConfigStorage, InternalConfig, DEFAULT_CONFIG},
+    debouncer::Debouncer,
     nixie_display::NixieDisplay,
     rgb_led::RgbLed,
     shift_register::ShiftRegister,
     storage::{InMemoryStorage, Storage},
 };
+use embedded_hal::digital::InputPin;
 use esp_idf_svc::hal::{gpio::*, prelude::*};
 use esp_idf_svc::nvs::EspCustomNvsPartition;
 use nixie_clock_rust::storage::NvsStorage;
@@ -58,6 +63,23 @@ fn main() -> anyhow::Result<()> {
         create_driver(ledc.channel2, ledc.timer2, pins.gpio25)?,
     );
 
+    let button_debouncer = Arc::new(Mutex::new(Debouncer::new(
+        0.1,
+        100,
+        PinDriver::input(pins.gpio19)?,
+    )));
+
+    let timer_service = EspTaskTimerService::new()?;
+    let callback_timer = {
+        let button_debouncer = button_debouncer.clone();
+        timer_service.timer(move || {
+            button_debouncer.lock().unwrap().update().unwrap();
+        })?
+    };
+
+    // Let it trigger every second
+    callback_timer.every(Duration::from_millis(10))?;
+
     let app_config = config_storage.lock().unwrap().load()?;
     info!("Setting led color to: #{:06x}", app_config.led_color());
     rgb.set_color(app_config.led_color())?;
@@ -87,8 +109,11 @@ fn main() -> anyhow::Result<()> {
         }
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates
         let local_time = Utc::now().with_timezone(&tz);
-        info!("Current time: {:?}", local_time);
-
+        info!(
+            "Current time: {:?} -- Button: {}",
+            local_time,
+            button_debouncer.lock().unwrap().is_low().unwrap()
+        );
         display.display(local_time);
 
         std::thread::sleep(std::time::Duration::from_millis(200));
