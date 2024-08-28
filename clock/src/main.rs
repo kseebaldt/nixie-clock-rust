@@ -98,6 +98,7 @@ fn main() -> anyhow::Result<()> {
     let (tx, rx) = channel::<InternalConfig>();
     let _server = create_server(config_storage, tx)?;
 
+    let mut counter = 0;
     loop {
         match rx.try_recv() {
             Ok(config) => {
@@ -107,6 +108,17 @@ fn main() -> anyhow::Result<()> {
             }
             _ => {}
         }
+
+        if button_debouncer.lock().unwrap().is_low().unwrap() {
+            counter = (counter + 1) % 5;
+        } else {
+            counter = 0;
+        }
+
+        if counter == 1 {
+            display.next_mode();
+        }
+
         // To get a better formatting of the time, you can use the `chrono` or `time` Rust crates
         let local_time = Utc::now().with_timezone(&tz);
         info!(
