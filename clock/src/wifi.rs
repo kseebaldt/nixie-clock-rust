@@ -1,29 +1,17 @@
 use anyhow::Result;
 
 use drivers::config::{DefaultConfig, InternalConfig};
-use esp_idf_svc::{
-    eventloop::EspSystemEventLoop,
-    hal::modem::Modem,
-    nvs::EspDefaultNvsPartition,
-    wifi::{
-        AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration,
-        EspWifi,
-    },
+use esp_idf_svc::wifi::{
+    AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi,
 };
 
 use log::info;
 
-pub fn wifi_create(
-    modem: Modem,
+pub fn configure_wifi(
+    wifi: &mut BlockingWifi<&mut EspWifi>,
     app_config: &InternalConfig,
     default_config: &DefaultConfig,
-) -> Result<esp_idf_svc::wifi::EspWifi<'static>> {
-    let sys_loop = EspSystemEventLoop::take()?;
-    let nvs = EspDefaultNvsPartition::take()?;
-
-    let mut esp_wifi = EspWifi::new(modem, sys_loop.clone(), Some(nvs.clone()))?;
-    let mut wifi = BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone())?;
-
+) -> Result<()> {
     info!("Configuring wifi with SSID: {}", app_config.wifi_ssid());
     info!(
         "Configuring access point with SSID: {} Pass: {}",
@@ -52,5 +40,5 @@ pub fn wifi_create(
     wifi.wait_netif_up()?;
     info!("Wifi netif up");
 
-    Ok(esp_wifi)
+    Ok(())
 }

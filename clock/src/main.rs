@@ -1,4 +1,5 @@
-use esp_idf_svc::{sntp, timer::EspTaskTimerService};
+use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
+use esp_idf_svc::{eventloop::EspSystemEventLoop, sntp, timer::EspTaskTimerService};
 use std::{
     sync::{mpsc::channel, Arc, Mutex},
     time::Duration,
@@ -17,13 +18,13 @@ use drivers::{
 };
 use embedded_hal::digital::InputPin;
 use esp_idf_svc::hal::{gpio::*, prelude::*};
-use esp_idf_svc::nvs::EspCustomNvsPartition;
+use esp_idf_svc::nvs::{EspCustomNvsPartition, EspDefaultNvsPartition};
 use nixie_clock_rust::storage::NvsStorage;
 
 use log::info;
 use nixie_clock_rust::rgb_led::create_driver;
 use nixie_clock_rust::server::create_server;
-use nixie_clock_rust::wifi::wifi_create;
+use nixie_clock_rust::wifi::configure_wifi;
 
 fn main() -> anyhow::Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -86,27 +87,48 @@ fn main() -> anyhow::Result<()> {
 
     let default_config = DEFAULT_CONFIG;
     // Keep it around or else the wifi will stop
-    let _wifi = wifi_create(modem, &app_config, &default_config)?;
+    let sys_loop: esp_idf_svc::eventloop::EspEventLoop<esp_idf_svc::eventloop::System> =
+        EspSystemEventLoop::take()?;
 
+    let nvs = EspDefaultNvsPartition::take()?;
+
+    let mut esp_wifi = EspWifi::new(modem, sys_loop.clone(), Some(nvs.clone()))?;
+    let mut wifi: BlockingWifi<&mut EspWifi<'_>> =
+        BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone())?;
+
+    if let Err(e) = configure_wifi(&mut wifi, &app_config, &default_config) {
+        info!("Error configuring wifi: {:?}", e);
+    }
     // Keep it around or else the SNTP service will stop
-    let _sntp = sntp::EspSntp::new_default()?;
+    let mut _sntp = sntp::EspSntp::new_default()?;
     info!("SNTP initialized");
+    let (tx, rx) = channel::<InternalConfig>();
+    let mut _server = create_server(config_storage.clone(), tx.clone())?;
 
     let mut tz: Tz = app_config.tz().parse().unwrap();
     info!("Time Zone: {:?}", tz);
 
-    let (tx, rx) = channel::<InternalConfig>();
-    let _server = create_server(config_storage, tx)?;
-
     let mut counter = 0;
     loop {
-        match rx.try_recv() {
-            Ok(config) => {
-                info!("Received new config: {:?}", config);
-                rgb.set_color(config.led_color())?;
-                tz = config.tz().parse().unwrap();
+        if let Ok(config) = rx.try_recv() {
+            info!("Received new config: {:?}", config);
+            rgb.set_color(config.led_color())?;
+            tz = config.tz().parse().unwrap();
+
+            let wifi_config = wifi.get_configuration()?;
+            let client_config = wifi_config.as_client_conf_ref().unwrap();
+            if client_config.ssid != config.wifi_ssid()
+                || client_config.password != config.wifi_pass()
+            {
+                wifi.stop()?;
+
+                if let Err(e) = configure_wifi(&mut wifi, &config, &default_config) {
+                    info!("Error configuring wifi: {:?}", e);
+                } else {
+                    drop(_sntp);
+                    _sntp = sntp::EspSntp::new_default()?;
+                }
             }
-            _ => {}
         }
 
         if button_debouncer.lock().unwrap().is_low().unwrap() {

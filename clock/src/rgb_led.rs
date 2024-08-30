@@ -1,7 +1,6 @@
 use esp_idf_hal::peripheral::Peripheral;
 use esp_idf_svc::hal::{gpio::OutputPin, ledc::*, prelude::*, sys::EspError};
 
-
 pub fn create_driver<'d, C, T>(
     channel: impl Peripheral<P = C> + 'd,
     timer: impl Peripheral<P = T> + 'd,
