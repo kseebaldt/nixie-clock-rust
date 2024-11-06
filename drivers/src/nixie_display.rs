@@ -8,11 +8,17 @@ pub enum DisplayMode {
     Year,
 }
 
+pub enum HourFormat {
+    TwelveHour,
+    TwentyFourHour,
+}
+
 pub struct NixieDisplay<'a, T, Pin1, Pin2> {
     shift_register: &'a mut T,
     seperator1: Pin1,
     seperator2: Pin2,
     mode: DisplayMode,
+    hour_format: HourFormat,
 }
 
 impl<'a, T, Pin1, Pin2> NixieDisplay<'a, T, Pin1, Pin2>
@@ -27,11 +33,16 @@ where
             seperator1,
             seperator2,
             mode: DisplayMode::Time,
+            hour_format: HourFormat::TwelveHour,
         }
     }
 
     pub fn set_mode(&mut self, mode: DisplayMode) {
         self.mode = mode;
+    }
+
+    pub fn set_hour_format(&mut self, hour_format: HourFormat) {
+        self.hour_format = hour_format;
     }
 
     pub fn next_mode(&mut self) {
@@ -51,7 +62,10 @@ where
     }
 
     pub fn display_time(&mut self, time: impl Timelike) {
-        let hours = time.hour();
+        let hours = match self.hour_format {
+            HourFormat::TwelveHour => time.hour12().1,
+            HourFormat::TwentyFourHour => time.hour(),
+        };
         let minutes = time.minute();
         let digits = [
             (hours / 10) as u8,

@@ -22,6 +22,7 @@ pub struct InternalConfig {
     wifi_pass: String,
     tz: String,
     led_color: u32,
+    hours_24: bool,
 }
 
 impl Default for InternalConfig {
@@ -32,17 +33,19 @@ impl Default for InternalConfig {
             wifi_config.wifi_pass,
             "US/Central",
             0x00000088,
+            false,
         )
     }
 }
 
 impl InternalConfig {
-    pub fn new(wifi_ssid: &str, wifi_pass: &str, tz: &str, led_color: u32) -> Self {
+    pub fn new(wifi_ssid: &str, wifi_pass: &str, tz: &str, led_color: u32, hours_24: bool) -> Self {
         InternalConfig {
             wifi_ssid: String::from(wifi_ssid),
             wifi_pass: String::from(wifi_pass),
             tz: String::from(tz),
             led_color,
+            hours_24,
         }
     }
 
@@ -94,15 +97,23 @@ pub struct Config {
     )]
     #[serde(rename = "ledColor")]
     led_color: String,
+    hours_24: bool,
 }
 
 impl Config {
-    pub fn new(wifi_ssid: &str, wifi_pass: &str, time_zone: &str, led_color: &str) -> Self {
+    pub fn new(
+        wifi_ssid: &str,
+        wifi_pass: &str,
+        time_zone: &str,
+        led_color: &str,
+        hours_24: bool,
+    ) -> Self {
         Config {
             wifi_ssid: String::from(wifi_ssid),
             wifi_pass: String::from(wifi_pass),
             time_zone: String::from(time_zone),
             led_color: String::from(led_color),
+            hours_24,
         }
     }
 
@@ -118,6 +129,7 @@ impl From<InternalConfig> for Config {
             wifi_pass: item.wifi_pass,
             time_zone: item.tz,
             led_color: format!("#{:06x}", item.led_color),
+            hours_24: item.hours_24,
         }
     }
 }
@@ -129,6 +141,7 @@ impl From<Config> for InternalConfig {
             wifi_pass: item.wifi_pass,
             tz: item.time_zone,
             led_color: u32::from_str_radix(&item.led_color.replace("#", ""), 16).unwrap_or(0),
+            hours_24: item.hours_24,
         }
     }
 }
@@ -191,7 +204,7 @@ mod tests {
         let storage = InMemoryStorage::new();
         let mut config_storage = ConfigStorage::new(Box::new(storage));
 
-        let config = InternalConfig::new("ssid", "pass", "US/Central", 0x123456);
+        let config = InternalConfig::new("ssid", "pass", "US/Central", 0x123456, false);
         config_storage.save(&config).unwrap();
 
         assert_eq!(config, config_storage.load().unwrap());
@@ -205,7 +218,7 @@ mod tests {
         let config = config_storage.load().unwrap();
         assert_eq!(config, InternalConfig::default());
 
-        let config = InternalConfig::new("ssid", "pass", "US/Central", 0x123456);
+        let config = InternalConfig::new("ssid", "pass", "US/Central", 0x123456, false);
         config_storage.save(&config).unwrap();
 
         assert_eq!(config, config_storage.load().unwrap());
@@ -213,13 +226,14 @@ mod tests {
 
     #[test]
     fn convert_internal_config_to_config() {
-        let config = InternalConfig::new("ssid", "pass", "US/Central", 0x123456);
+        let config = InternalConfig::new("ssid", "pass", "US/Central", 0x123456, false);
 
         let expected = Config {
             wifi_ssid: "ssid".to_string(),
             wifi_pass: "pass".to_string(),
             time_zone: "US/Central".to_string(),
             led_color: "#123456".to_string(),
+            hours_24: false,
         };
 
         assert_eq!(expected, config.into());
@@ -227,13 +241,14 @@ mod tests {
 
     #[test]
     fn convert_config_to_internal_config() {
-        let expected = InternalConfig::new("ssid", "pass", "US/Central", 0x123456);
+        let expected = InternalConfig::new("ssid", "pass", "US/Central", 0x123456, false);
 
         let config = Config {
             wifi_ssid: "ssid".to_string(),
             wifi_pass: "pass".to_string(),
             time_zone: "US/Central".to_string(),
             led_color: "#123456".to_string(),
+            hours_24: false,
         };
 
         assert_eq!(expected, config.into());
@@ -241,7 +256,7 @@ mod tests {
 
     #[test]
     fn valid_config() {
-        let config: Config = Config::new("ssid", "pass", "US/Central", "#123456");
+        let config: Config = Config::new("ssid", "pass", "US/Central", "#123456", false);
 
         assert!(config.validate().is_ok());
     }
@@ -253,6 +268,7 @@ mod tests {
             "pass",
             "US/Central",
             "#123456",
+            false,
         );
 
         let result = config.validate();
@@ -267,8 +283,11 @@ mod tests {
     #[test]
     fn validate_time_zone_is_not_blank() {
         let config: Config = Config::new(
-            "ssid", "pass", "", // Missing time zone
+            "ssid", 
+            "pass", 
+            "", // Missing time zone
             "#123456",
+            false,
         );
 
         let result = config.validate();
@@ -286,7 +305,8 @@ mod tests {
             "ssid",
             "pass",
             "US/Central",
-            "123456", // Missing #
+            "123456", // Missing #,
+            false,
         );
 
         let result = config.validate();
@@ -305,6 +325,7 @@ mod tests {
             "pass",
             "US/Central",
             "#abcdeg", // Invalid hex color
+            false,
         );
 
         let result = config.validate();
