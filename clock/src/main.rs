@@ -1,3 +1,4 @@
+use drivers::nixie_display::HourFormat;
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use esp_idf_svc::{eventloop::EspSystemEventLoop, sntp, timer::EspTaskTimerService};
 use std::{
@@ -83,6 +84,8 @@ fn main() -> anyhow::Result<()> {
 
     let app_config = config_storage.lock().unwrap().load()?;
     info!("Setting led color to: #{:06x}", app_config.led_color());
+    let hour_format = if app_config.hours_24() { HourFormat::TwentyFourHour } else { HourFormat::TwelveHour };
+    display.set_hour_format(hour_format);
     rgb.set_color(app_config.led_color())?;
 
     let default_config = DEFAULT_CONFIG;

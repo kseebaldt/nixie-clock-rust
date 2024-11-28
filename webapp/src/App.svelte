@@ -14,6 +14,7 @@
     wifiPass: "",
     timeZone: "",
     ledColor: "",
+    hours24: false,
   };
 
   onMount(async () => {
@@ -94,6 +95,16 @@
       </div>
     </fieldset>
 
+    <fieldset class="hours-container">
+      <label for="hours24">24 Hour Time</label>
+      <input
+        id="hours24"
+        name="hours24"
+        type="checkbox"
+        bind:checked={config.hours24}
+      />
+    </fieldset>
+
     <button type="submit">Save</button>
   </form>
 </main>
@@ -141,6 +152,15 @@
   .color-input-container {
     display: flex;
     align-items: center;
+  }
+
+  .hours-container {
+    display: flex;
+    column-gap: 10px;
+  }
+
+  .hours-container label{
+    display: inline-block;
   }
 
   input[type="color"] {

@@ -64,6 +64,10 @@ impl InternalConfig {
     pub fn led_color(&self) -> u32 {
         self.led_color
     }
+
+    pub fn hours_24(&self) -> bool {
+        self.hours_24
+    }
 }
 
 fn validate_color(color: &str) -> Result<(), ValidationError> {
