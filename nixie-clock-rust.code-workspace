@@ -9,6 +9,10 @@
 			"path": "clock"
 		},
 		{
+			"name": "clock-no_std",
+			"path": "clock-no_std"
+		},		
+		{
 			"name": "drivers",
 			"path": "drivers"
 		},		
