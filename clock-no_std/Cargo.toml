@@ -7,6 +7,7 @@ version = "0.1.0"
 name = "clock-no_std"
 path = "./src/bin/main.rs"
 
+
 [dependencies]
 esp-bootloader-esp-idf = "0.1.0"
 esp-hal                = { version = "=1.0.0-beta.1", features = ["esp32", "unstable"] }
@@ -15,6 +16,9 @@ esp-hal                = { version = "=1.0.0-beta.1", features = ["esp32", "unst
 drivers = { path = "../drivers", default-features = false }
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
+
+# Embassy synchronization
+embassy-sync = "0.6"
 
 # Logging
 log = "0.4"
@@ -37,6 +41,7 @@ esp-alloc = "0.8.0"
 critical-section = "1.2.0"
 embassy-executor = { version = "0.7.0", features = ["task-arena-size-20480"] }
 embassy-time = "0.4.0"
+embassy-futures = "0.1.0"
 esp-hal-embassy = { version = "0.8.1", features = ["esp32"] }
 esp-wifi = { version = "0.14.1", features = [
   "builtin-scheduler",
