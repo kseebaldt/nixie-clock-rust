@@ -9,15 +9,14 @@
 use clock_no_std::simple_nixie::SimpleNixie;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use embassy_futures::yield_now;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use esp_hal::{
     clock::CpuClock,
-    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    gpio::{Input, Level, Output, Pull},
     timer::timg::TimerGroup,
 };
 use esp_println::println;
-use chrono::{DateTime, Timelike};
+use chrono::DateTime;
 use static_cell::StaticCell;
 
 #[panic_handler]
@@ -44,17 +43,18 @@ async fn main(spawner: Spawner) {
 
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
-    let timer0 = TimerGroup::new(peripherals.TIMG1);
-    esp_hal_embassy::init(timer0.timer0);
+    // Initialize Embassy timer (use TIMG0 for proper Embassy support)
+    let timer_group0 = TimerGroup::new(peripherals.TIMG0);
+    esp_hal_embassy::init(timer_group0.timer0);
 
     // Initialize nixie display pins
     // Based on the ACTUAL original clock configuration:
     // - Data pin: GPIO16
     // - Clock pin: GPIO17  
     // - Latch pin: GPIO18
-    let data_pin = Output::new(peripherals.GPIO16, Level::Low, OutputConfig::default());
-    let clock_pin = Output::new(peripherals.GPIO17, Level::Low, OutputConfig::default());
-    let latch_pin = Output::new(peripherals.GPIO18, Level::Low, OutputConfig::default());
+    let data_pin = Output::new(peripherals.GPIO16, Level::Low);
+    let clock_pin = Output::new(peripherals.GPIO17, Level::Low);
+    let latch_pin = Output::new(peripherals.GPIO18, Level::Low);
     
     // Store pins in static cells for task use
     static DATA_PIN: StaticCell<Output<'static>> = StaticCell::new();
@@ -66,8 +66,7 @@ async fn main(spawner: Spawner) {
     let latch_pin = LATCH_PIN.init(latch_pin);
     
     // Set up button pin for async usage
-    let config = InputConfig::default().with_pull(Pull::Up);
-    let button = Input::new(peripherals.GPIO19, config);
+    let button = Input::new(peripherals.GPIO19, Pull::Up);
     
     println!("Button pin configured on GPIO19");
     
@@ -95,11 +94,9 @@ async fn main(spawner: Spawner) {
         println!("Failed to spawn button task");
     }
 
-    // Main loop - keep running (use yield_now since Timer::after has issues)
+    // Main loop - keep running
     loop {
-        for _ in 0..200000 { // Rough equivalent to 10 second delay
-            yield_now().await;
-        }
+        Timer::after(Duration::from_secs(10)).await;
     }
 }
 
@@ -114,9 +111,7 @@ async fn button_task(button: &'static mut Input<'static>) {
         BUTTON_PRESS_SIGNAL.signal(());
         
         // Simple debounce delay
-        for _ in 0..1000 {
-            yield_now().await;
-        }
+        Timer::after(Duration::from_millis(50)).await;
     }
 }
 
@@ -157,9 +152,7 @@ async fn display_update_task(
         
         counter += 1;
         
-        // Use a simple delay loop instead of Timer::after since that's broken
-        for _ in 0..50 {
-            yield_now().await;
-        }
+        // Embassy Timer should work with esp-hal v0.23.1 and esp-hal-embassy v0.6.0
+        Timer::after(Duration::from_millis(50)).await;
     }
 }
