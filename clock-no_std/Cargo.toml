@@ -32,10 +32,12 @@ esp-backtrace = { version = "0.14", features = [
 
 # Time support (for Phase 2)
 chrono = { version = "0.4", default-features = false }
-# chrono-tz = { version = "0.8", default-features = false }  # TODO: Add back in Phase 5
+chrono-tz = { version = "0.8", default-features = false } # Added for timezone support
+# Using manual SNTP implementation compatible with embassy-net async
 
 embassy-net = { version = "0.7.0", features = [
   "dhcpv4",
+  "dns",
   "medium-ethernet",
   "tcp",
   "udp",
@@ -69,6 +71,13 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 ] }
 static_cell = { version = "2.1.0", features = ["nightly"] }
 heapless = "0.8"
+picoserve = { version = "0.15.0", features = ["embassy"] }
+serde = { version = "1.0", features = ["derive"], default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+postcard = { version = "1.0", default-features = false, features = [
+  "alloc",
+  "heapless",
+] }
 
 
 [profile.dev]

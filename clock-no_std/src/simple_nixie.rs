@@ -1,7 +1,6 @@
-use drivers::shift_register::{Shift, ShiftRegister};
 use embedded_hal::digital::OutputPin;
 use esp_println::println;
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, Timelike};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DisplayMode {
@@ -26,7 +25,9 @@ where
     LATCH: OutputPin,
     DATA: OutputPin,
 {
-    shift_register: ShiftRegister<'a, DATA, CLK, LATCH>,
+    data_pin: &'a mut DATA,
+    clock_pin: &'a mut CLK,
+    latch_pin: &'a mut LATCH,
     current_mode: DisplayMode,
     hours_24: bool,
 }
@@ -39,7 +40,9 @@ where
 {
     pub fn new(data: &'a mut DATA, clock: &'a mut CLK, latch: &'a mut LATCH) -> Self {
         Self {
-            shift_register: ShiftRegister::new(data, clock, latch),
+            data_pin: data,
+            clock_pin: clock,
+            latch_pin: latch,
             current_mode: DisplayMode::Time,
             hours_24: false,
         }
@@ -63,12 +66,34 @@ where
         self.hours_24 = hours_24;
     }
 
+    /// Simple shift register implementation inline
+    fn shift_byte(&mut self, byte: u8) -> Result<(), CLK::Error> {
+        for i in 0..8 {
+            // Set data pin based on bit (MSB first)
+            let bit = (byte >> (7 - i)) & 1;
+            if bit == 1 {
+                let _ = self.data_pin.set_high();
+            } else {
+                let _ = self.data_pin.set_low();
+            }
+            
+            // Clock pulse
+            let _ = self.clock_pin.set_high();
+            let _ = self.clock_pin.set_low();
+        }
+        Ok(())
+    }
+
+    /// Latch the data to output
+    fn latch(&mut self) -> Result<(), CLK::Error> {
+        let _ = self.latch_pin.set_high();
+        let _ = self.latch_pin.set_low();
+        Ok(())
+    }
+
     /// Display 4 digits on the nixie tubes
-    /// Uses the exact same logic as the original show_digits method
     pub fn display_digits(&mut self, digits: &[u8; 4]) -> Result<(), CLK::Error> {
-        // Process digits exactly like the original show_digits method
-        // This processes in pairs from right to left
-        
+        // Process digits in pairs from right to left (same as original)
         for i in (0..digits.len()).step_by(2) {
             let start = digits.len() - i - 1;
             let a = digits[start];
@@ -79,16 +104,16 @@ where
             };
             
             let byte_value = a * 16 + b;
-            self.shift_register.shift(byte_value);
+            self.shift_byte(byte_value)?;
         }
         
         // Latch the data
-        self.shift_register.store();
+        self.latch()?;
         Ok(())
     }
 
     /// Update display based on current mode and time
-    pub fn update(&mut self, now: &DateTime<Utc>) -> Result<(), CLK::Error> {
+    pub fn update(&mut self, now: &DateTime<chrono::Utc>) -> Result<(), CLK::Error> {
         match self.current_mode {
             DisplayMode::Time => self.display_time(now),
             DisplayMode::Date => self.display_date(now),
@@ -96,7 +121,7 @@ where
         }
     }
 
-    fn display_time(&mut self, now: &DateTime<Utc>) -> Result<(), CLK::Error> {
+    fn display_time(&mut self, now: &DateTime<chrono::Utc>) -> Result<(), CLK::Error> {
         let mut hour = now.hour();
         
         // Convert to 12-hour format if needed
@@ -119,7 +144,7 @@ where
         self.display_digits(&[h1, h2, m1, m2])
     }
 
-    fn display_date(&mut self, now: &DateTime<Utc>) -> Result<(), CLK::Error> {
+    fn display_date(&mut self, now: &DateTime<chrono::Utc>) -> Result<(), CLK::Error> {
         let month = now.month();
         let day = now.day();
         
@@ -132,7 +157,7 @@ where
         self.display_digits(&[m1, m2, d1, d2])
     }
 
-    fn display_year(&mut self, now: &DateTime<Utc>) -> Result<(), CLK::Error> {
+    fn display_year(&mut self, now: &DateTime<chrono::Utc>) -> Result<(), CLK::Error> {
         let year = now.year();
         
         // Display YYYY
