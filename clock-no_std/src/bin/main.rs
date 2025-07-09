@@ -7,6 +7,7 @@
 )]
 
 use drivers::nixie_display::{NixieDisplay, HourFormat};
+use drivers::rgb_led::RgbLed;
 use drivers::shift_register::ShiftRegister;
 // use drivers::debouncer::Debouncer;  // TODO: Integrate async debouncing
 use embassy_executor::Spawner;
@@ -15,6 +16,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal}
 use esp_hal::{
     clock::CpuClock,
     gpio::{Input, Level, Output, Pull},
+    ledc::*,
     rng::Rng,
     timer::timg::TimerGroup,
 };
@@ -180,7 +182,23 @@ async fn main(spawner: Spawner) {
     let sep1_pin = SEP1_PIN.init(sep1_pin);
     let sep2_pin = SEP2_PIN.init(sep2_pin);
     
-    println!("Nixie display and button initialized");
+    // Initialize RGB LED with PWM via LEDC
+    // LEDC channels implement embedded_hal::pwm::SetDutyCycle
+    let ledc = Ledc::new(peripherals.LEDC);
+    
+    // Configure RGB LED channels with LEDC
+    let r_channel = ledc.channel(channel::Number::Channel0, peripherals.GPIO22);
+    let g_channel = ledc.channel(channel::Number::Channel1, peripherals.GPIO23);
+    let b_channel = ledc.channel(channel::Number::Channel2, peripherals.GPIO24);
+    
+    // Create RGB LED instance using LEDC channels
+    let rgb_led = RgbLed::new(r_channel, g_channel, b_channel);
+    
+    // Store RGB LED in static cell for the LED config task
+    static RGB_LED: StaticCell<RgbLed<channel::Channel<'static, esp_hal::ledc::HighSpeed>>> = StaticCell::new();
+    let rgb_led = RGB_LED.init(rgb_led);
+    
+    println!("Nixie display, button, and RGB LED initialized");
     
     // WiFi configuration for Wokwi-GUEST (no authentication)
     let client_config = ClientConfiguration {
@@ -224,7 +242,7 @@ async fn main(spawner: Spawner) {
     }
     
     // Spawn LED configuration hot-reload task
-    if spawner.spawn(led_config_task()).is_err() {
+    if spawner.spawn(led_config_task(rgb_led)).is_err() {
         println!("Failed to spawn LED config task");
     }
 
@@ -576,7 +594,7 @@ async fn wifi_config_task() {
 }
 
 #[embassy_executor::task] 
-async fn led_config_task() {
+async fn led_config_task(rgb_led: &'static mut RgbLed<channel::Channel<'static, esp_hal::ledc::HighSpeed>>) {
     println!("LED config task started - listening for LED color changes");
     
     loop {
@@ -584,9 +602,12 @@ async fn led_config_task() {
         let new_color = LED_CONFIG_SIGNAL.wait().await;
         println!("*** LED color change received: 0x{:06X} ***", new_color);
         
-        // TODO: Implement LED color updates
-        // This would involve updating the RGB LED driver with the new color
-        println!("LED color update would happen here (RGB LED not implemented yet)");
+        // Use the RgbLed driver to set the color
+        if let Err(e) = rgb_led.set_color(new_color) {
+            println!("Failed to set RGB LED color: {:?}", e);
+        } else {
+            println!("RGB LED updated to color: 0x{:06X}", new_color);
+        }
     }
 }
 
