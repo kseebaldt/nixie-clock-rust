@@ -6,7 +6,8 @@
     holding buffers for the duration of a data transfer."
 )]
 
-use clock_no_std::simple_nixie::SimpleNixie;
+use drivers::nixie_display::{NixieDisplay, HourFormat};
+use drivers::shift_register::ShiftRegister;
 // use drivers::debouncer::Debouncer;  // TODO: Integrate async debouncing
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
@@ -167,6 +168,18 @@ async fn main(spawner: Spawner) {
     static BUTTON_PIN: StaticCell<Input<'static>> = StaticCell::new();
     let button = BUTTON_PIN.init(button);
     
+    // Add separator pins for nixie display visual effects
+    // GPIO20 and GPIO21 for separator control
+    let sep1_pin = Output::new(peripherals.GPIO20, Level::Low);
+    let sep2_pin = Output::new(peripherals.GPIO21, Level::Low);
+    
+    // Store separator pins in static cells
+    static SEP1_PIN: StaticCell<Output<'static>> = StaticCell::new();
+    static SEP2_PIN: StaticCell<Output<'static>> = StaticCell::new();
+    
+    let sep1_pin = SEP1_PIN.init(sep1_pin);
+    let sep2_pin = SEP2_PIN.init(sep2_pin);
+    
     println!("Nixie display and button initialized");
     
     // WiFi configuration for Wokwi-GUEST (no authentication)
@@ -221,7 +234,7 @@ async fn main(spawner: Spawner) {
     }
 
     // Spawn display update task that handles mode cycling
-    if spawner.spawn(display_update_task(data_pin, clock_pin, latch_pin)).is_err() {
+    if spawner.spawn(display_update_task(data_pin, clock_pin, latch_pin, sep1_pin, sep2_pin)).is_err() {
         println!("Failed to spawn display task");
     }
     
@@ -255,14 +268,18 @@ async fn button_task(button: &'static mut Input<'static>) {
 async fn display_update_task(
     data_pin: &'static mut Output<'static>,
     clock_pin: &'static mut Output<'static>, 
-    latch_pin: &'static mut Output<'static>
+    latch_pin: &'static mut Output<'static>,
+    sep1_pin: &'static mut Output<'static>,
+    sep2_pin: &'static mut Output<'static>
 ) {
-    let mut nixie_display = SimpleNixie::new(data_pin, clock_pin, latch_pin);
+    let mut shift_register = ShiftRegister::new(data_pin, clock_pin, latch_pin);
+    let mut nixie_display = NixieDisplay::new(&mut shift_register, sep1_pin, sep2_pin);
     
-    // Initial test display
-    if let Err(_e) = nixie_display.test_pattern() {
-        println!("Test pattern failed");
-    }
+    // Set initial format to 24-hour
+    nixie_display.set_hour_format(HourFormat::TwentyFourHour);
+    
+    // Initial test display - show current time
+    println!("NixieDisplay initialized with separator pins");
     
     let mut counter = 0u64;
     
@@ -272,13 +289,14 @@ async fn display_update_task(
         if BUTTON_PRESS_SIGNAL.try_take().is_some() {
             println!("*** MODE CHANGE RECEIVED IN DISPLAY TASK! ***");
             nixie_display.next_mode();
-            println!("Mode cycled, new mode: {:?}", nixie_display.get_mode());
+            println!("Mode cycled to next mode");
         }
         
         // Check for display configuration changes
         if let Some((timezone, hours_24)) = DISPLAY_CONFIG_SIGNAL.try_take() {
             println!("*** DISPLAY CONFIG CHANGE: timezone={}, 24h={} ***", timezone, hours_24);
-            nixie_display.set_24_hour_format(hours_24);
+            let format = if hours_24 { HourFormat::TwentyFourHour } else { HourFormat::TwelveHour };
+            nixie_display.set_hour_format(format);
             
             // Update timezone in time manager
             if let Some(time_manager) = unsafe { TIME_MANAGER_REF } {
@@ -312,13 +330,12 @@ async fn display_update_task(
                     .expect("Invalid fake timestamp")
             };
             
-            if let Err(_e) = nixie_display.update(&display_time) {
-                println!("Display update failed");
-            } else {
-                // Log the displayed time occasionally
-                if counter % 1200 == 0 { // Every 60 seconds
-                    println!("Display showing time: {}", display_time);
-                }
+            // Use the new NixieDisplay API - no error handling needed
+            nixie_display.display(display_time);
+            
+            // Log the displayed time occasionally
+            if counter % 1200 == 0 { // Every 60 seconds
+                println!("Display showing time: {}", display_time);
             }
         }
         
