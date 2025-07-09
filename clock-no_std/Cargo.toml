@@ -13,7 +13,7 @@ esp-bootloader-esp-idf = "0.1.0"
 esp-hal = { version = "=0.23.1", features = ["esp32", "unstable"] }
 
 # Hardware drivers
-drivers = { path = "../drivers", default-features = false }
+drivers = { path = "../drivers", default-features = false } # Re-enabled for no_std compatibility
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
 
