@@ -8,7 +8,11 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Ticker};
 use embedded_hal::digital::InputPin;
 use esp_hal::clock::CpuClock;
-use esp_hal::gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::gpio::{DriveMode, Input, InputConfig, Level, Output, OutputConfig, Pull};
+use esp_hal::ledc::channel::{self, ChannelIFace};
+use esp_hal::ledc::timer::{self, TimerIFace};
+use esp_hal::ledc::{LSGlobalClkSource, Ledc, LowSpeed};
+use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _};
@@ -16,6 +20,7 @@ use {esp_backtrace as _, esp_println as _};
 use chrono::NaiveDateTime;
 use drivers::debouncer::Debouncer;
 use drivers::nixie_display::{HourFormat, NixieDisplay};
+use drivers::rgb_led::RgbLed;
 use drivers::shift_register::ShiftRegister;
 
 extern crate alloc;
@@ -76,6 +81,62 @@ async fn main(spawner: Spawner) -> ! {
     let button_pin = Input::new(peripherals.GPIO19, button_config);
 
     info!("GPIO configured");
+
+    // =========================================================================
+    // LEDC PWM Setup for RGB LED
+    // =========================================================================
+
+    let mut ledc = Ledc::new(peripherals.LEDC);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+
+    // Configure timer at 5kHz with 8-bit resolution
+    let mut lstimer0 = ledc.timer::<LowSpeed>(timer::Number::Timer0);
+    lstimer0
+        .configure(timer::config::Config {
+            duty: timer::config::Duty::Duty8Bit,
+            clock_source: timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(5),
+        })
+        .expect("Failed to configure LEDC timer");
+
+    // Configure RGB channels (active-low for common anode LED)
+    // Red on GPIO27, Channel0
+    let mut red_channel = ledc.channel(channel::Number::Channel0, peripherals.GPIO27);
+    red_channel
+        .configure(channel::config::Config {
+            timer: &lstimer0,
+            duty_pct: 100, // Start off (inverted)
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("Failed to configure red channel");
+
+    // Green on GPIO26, Channel1
+    let mut green_channel = ledc.channel(channel::Number::Channel1, peripherals.GPIO26);
+    green_channel
+        .configure(channel::config::Config {
+            timer: &lstimer0,
+            duty_pct: 100, // Start off (inverted)
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("Failed to configure green channel");
+
+    // Blue on GPIO25, Channel2
+    let mut blue_channel = ledc.channel(channel::Number::Channel2, peripherals.GPIO25);
+    blue_channel
+        .configure(channel::config::Config {
+            timer: &lstimer0,
+            duty_pct: 100, // Start off (inverted)
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("Failed to configure blue channel");
+
+    // Create RGB LED driver
+    let mut rgb = RgbLed::new(red_channel, green_channel, blue_channel);
+
+    // Set initial color (blue)
+    rgb.set_color(0x000088).expect("Failed to set RGB color");
+
+    info!("RGB LED initialized");
 
     // =========================================================================
     // Initialize drivers
