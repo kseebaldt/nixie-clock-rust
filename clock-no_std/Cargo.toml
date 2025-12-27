@@ -29,6 +29,7 @@ embassy-net = { version = "0.7.1", features = [
   "tcp",
   "udp",
 ] }
+embedded-hal = "1.0.0"
 embedded-io = { version = "0.7.1", features = ["defmt"] }
 embedded-io-async = { version = "0.7.0", features = ["defmt"] }
 esp-alloc = { version = "0.9.0", features = ["defmt"] }
@@ -65,6 +66,16 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
 
 critical-section = "1.2.0"
 static_cell      = "2.1.1"
+embassy-sync     = "0.6"
+
+# Local crates
+drivers = { path = "../drivers", default-features = false }
+
+# Time
+chrono = { version = "0.4", default-features = false }
+
+# Serialization
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 
 
 [profile.dev]

@@ -3,3 +3,11 @@ version = 1
 gdbServerPort = 3333
 elf = "target/xtensa-esp32-none-elf/debug/clock-no_std"
 firmware = "target/xtensa-esp32-none-elf/debug/clock-no_std"
+
+[[chip]]
+name = 'cd4511'
+binary = '../chip/dist/chip.wasm'
+
+[[net.forward]]
+from = "localhost:9080"
+to = "target:80"
