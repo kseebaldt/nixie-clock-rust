@@ -18,7 +18,7 @@ impl Recorder {
         }
     }
 
-    pub fn create_pin(&self, pin_number: u32) -> FakePin {
+    pub fn create_pin(&self, pin_number: u32) -> FakePin<'_> {
         FakePin::new(pin_number, self)
     }
 
@@ -33,7 +33,7 @@ impl Recorder {
             .filter(|(p, _)| *p == pin.pin_number)
             .map(|(_, state)| state.clone())
             .collect();
-    }    
+    }
 
     pub fn push_state(&self, pin: u32, state: PinState) {
         self.states.borrow_mut().push((pin, state));
@@ -68,14 +68,12 @@ impl<'a> FakePin<'a> {
 
 impl<'a> OutputPin for FakePin<'a> {
     fn set_high(&mut self) -> Result<(), Self::Error> {
-        self.recorder
-            .push_state(self.pin_number, PinState::High);
+        self.recorder.push_state(self.pin_number, PinState::High);
         Ok(())
     }
 
     fn set_low(&mut self) -> Result<(), Self::Error> {
-        self.recorder
-            .push_state(self.pin_number, PinState::Low);
+        self.recorder.push_state(self.pin_number, PinState::Low);
         Ok(())
     }
 }

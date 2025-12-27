@@ -1,13 +1,25 @@
-use std::collections::HashMap;
-use thiserror::Error;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use hashbrown::HashMap;
 
-#[derive(Error, Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageError {
-    #[error("error reading from storage")]
     ReadError,
-    #[error("error writing to storage")]
     WriteError,
 }
+
+impl core::fmt::Display for StorageError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StorageError::ReadError => write!(f, "error reading from storage"),
+            StorageError::WriteError => write!(f, "error writing to storage"),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for StorageError {}
 
 pub trait Storage {
     fn set_raw(&mut self, name: &str, buf: &[u8]) -> Result<bool, StorageError>;
@@ -42,13 +54,13 @@ impl Storage for InMemoryStorage {
         match self.storage.get(name) {
             Some(v) => {
                 match buf.len().cmp(&v.len()) {
-                    std::cmp::Ordering::Equal => {
+                    Ordering::Equal => {
                         buf.copy_from_slice(v);
                     }
-                    std::cmp::Ordering::Greater => {
+                    Ordering::Greater => {
                         buf[..v.len()].copy_from_slice(v);
                     }
-                    std::cmp::Ordering::Less => {
+                    Ordering::Less => {
                         buf.copy_from_slice(&v[..buf.len()]);
                     }
                 }
@@ -73,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn test_in_memory_storage() {
+    fn it_stores_and_retrieves_raw_bytes() {
         let mut storage = InMemoryStorage::new();
 
         let value: [u8; 3] = [1, 2, 3];
@@ -89,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde() {
+    fn it_serializes_and_deserializes_structs() {
         let mut storage = InMemoryStorage::new();
 
         let my_struct = TestStruct {

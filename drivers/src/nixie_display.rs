@@ -74,7 +74,7 @@ where
             (minutes % 10) as u8,
         ];
         self.show_digits(&digits);
-        if (time.second() % 2) == 0 {
+        if time.second().is_multiple_of(2) {
             self.seperator1.set_high().unwrap();
             self.seperator2.set_high().unwrap();
         } else {
@@ -262,7 +262,7 @@ mod tests {
         let value = values.next().unwrap();
 
         assert_eq!(value[0], 4 * 16 + 2);
-        assert_eq!(value[1], 0 * 16 + 2);
+        assert_eq!(value[1], 2);
         assert_eq!(sep1.states()[0], PinState::Low);
         assert_eq!(sep2.states()[0], PinState::Low);
     }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use drivers::config::{DefaultConfig, InternalConfig};
+use drivers::config::{InternalConfig, DEFAULT_AP_PASS, DEFAULT_AP_SSID};
 use esp_idf_svc::wifi::{
     AccessPointConfiguration, AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi,
 };
@@ -10,12 +10,11 @@ use log::info;
 pub fn configure_wifi(
     wifi: &mut BlockingWifi<&mut EspWifi>,
     app_config: &InternalConfig,
-    default_config: &DefaultConfig,
 ) -> Result<()> {
     info!("Configuring wifi with SSID: {}", app_config.wifi_ssid());
     info!(
         "Configuring access point with SSID: {} Pass: {}",
-        default_config.ap_ssid, default_config.ap_pass
+        DEFAULT_AP_SSID, DEFAULT_AP_PASS
     );
     wifi.set_configuration(&Configuration::Mixed(
         ClientConfiguration {
@@ -25,8 +24,8 @@ pub fn configure_wifi(
             ..Default::default()
         },
         AccessPointConfiguration {
-            ssid: default_config.ap_ssid.try_into().unwrap(),
-            password: default_config.ap_pass.try_into().unwrap(),
+            ssid: DEFAULT_AP_SSID.try_into().unwrap(),
+            password: DEFAULT_AP_PASS.try_into().unwrap(),
             ..Default::default()
         },
     ))?;

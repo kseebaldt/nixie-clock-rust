@@ -10,7 +10,7 @@ use chrono::Utc;
 use chrono_tz::Tz;
 
 use drivers::{
-    config::{ConfigStorage, InternalConfig, DEFAULT_CONFIG},
+    config::{ConfigStorage, InternalConfig},
     debouncer::Debouncer,
     nixie_display::NixieDisplay,
     rgb_led::RgbLed,
@@ -84,11 +84,14 @@ fn main() -> anyhow::Result<()> {
 
     let app_config = config_storage.lock().unwrap().load()?;
     info!("Setting led color to: #{:06x}", app_config.led_color());
-    let hour_format = if app_config.hours_24() { HourFormat::TwentyFourHour } else { HourFormat::TwelveHour };
+    let hour_format = if app_config.hours_24() {
+        HourFormat::TwentyFourHour
+    } else {
+        HourFormat::TwelveHour
+    };
     display.set_hour_format(hour_format);
     rgb.set_color(app_config.led_color())?;
 
-    let default_config = DEFAULT_CONFIG;
     // Keep it around or else the wifi will stop
     let sys_loop: esp_idf_svc::eventloop::EspEventLoop<esp_idf_svc::eventloop::System> =
         EspSystemEventLoop::take()?;
@@ -99,7 +102,7 @@ fn main() -> anyhow::Result<()> {
     let mut wifi: BlockingWifi<&mut EspWifi<'_>> =
         BlockingWifi::wrap(&mut esp_wifi, sys_loop.clone())?;
 
-    if let Err(e) = configure_wifi(&mut wifi, &app_config, &default_config) {
+    if let Err(e) = configure_wifi(&mut wifi, &app_config) {
         info!("Error configuring wifi: {:?}", e);
     }
     // Keep it around or else the SNTP service will stop
@@ -125,7 +128,7 @@ fn main() -> anyhow::Result<()> {
             {
                 wifi.stop()?;
 
-                if let Err(e) = configure_wifi(&mut wifi, &config, &default_config) {
+                if let Err(e) = configure_wifi(&mut wifi, &config) {
                     info!("Error configuring wifi: {:?}", e);
                 } else {
                     drop(_sntp);

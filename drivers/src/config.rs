@@ -1,20 +1,20 @@
+use alloc::boxed::Box;
+use alloc::string::String;
+use core::fmt::Write;
+
 use postcard::{from_bytes, to_vec};
 use serde::{Deserialize, Serialize};
-use validator::{Validate, ValidationError};
 
 use crate::storage::{Storage, StorageError};
 
-#[toml_cfg::toml_config]
-struct DefaultConfig {
-    #[default("Wokwi-GUEST")]
-    wifi_ssid: &'static str,
-    #[default("")]
-    wifi_pass: &'static str,
-    #[default("nixie-clock")]
-    ap_ssid: &'static str,
-    #[default("")]
-    ap_pass: &'static str,
-}
+/// Default WiFi SSID for station mode
+pub const DEFAULT_WIFI_SSID: &str = "Wokwi-GUEST";
+/// Default WiFi password for station mode
+pub const DEFAULT_WIFI_PASS: &str = "";
+/// Default SSID for access point mode
+pub const DEFAULT_AP_SSID: &str = "nixie-clock";
+/// Default password for access point mode
+pub const DEFAULT_AP_PASS: &str = "";
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct InternalConfig {
@@ -27,10 +27,9 @@ pub struct InternalConfig {
 
 impl Default for InternalConfig {
     fn default() -> Self {
-        let wifi_config = DEFAULT_CONFIG;
         InternalConfig::new(
-            wifi_config.wifi_ssid,
-            wifi_config.wifi_pass,
+            DEFAULT_WIFI_SSID,
+            DEFAULT_WIFI_PASS,
             "US/Central",
             0x00000088,
             false,
@@ -70,35 +69,27 @@ impl InternalConfig {
     }
 }
 
-fn validate_color(color: &str) -> Result<(), ValidationError> {
-    for (i, c) in color.chars().enumerate() {
-        match (i, c) {
-            (0, '#') => continue,
-            (_, '0'..='9') | (_, 'a'..='f') | (_, 'A'..='F') => continue,
-            _ => {
-                return Err(ValidationError::new("invalid_color"));
-            }
-        }
-    }
-
-    Ok(())
+/// Validation error for Config
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidationError {
+    pub field: &'static str,
+    pub message: &'static str,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone, Validate)]
+impl ValidationError {
+    pub fn new(field: &'static str, message: &'static str) -> Self {
+        Self { field, message }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
 pub struct Config {
-    #[validate(length(min = 1, message = "SSID must not be blank"))]
     #[serde(rename = "wifiSsid")]
     wifi_ssid: String,
-    #[validate(length(min = 0))]
     #[serde(rename = "wifiPass")]
     wifi_pass: String,
-    #[validate(length(min = 1, message = "time zone must not be blank"))]
     #[serde(rename = "timeZone")]
     time_zone: String,
-    #[validate(
-        length(equal = 7, message = "led color is invalid"),
-        custom(function = "validate_color", message = "led color is invalid")
-    )]
     #[serde(rename = "ledColor")]
     led_color: String,
     hours_24: bool,
@@ -121,9 +112,54 @@ impl Config {
         }
     }
 
-    pub fn validate(&self) -> Result<(), validator::ValidationErrors> {
-        Validate::validate(self)
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        // Validate SSID is not blank
+        if self.wifi_ssid.is_empty() {
+            return Err(ValidationError::new("wifi_ssid", "SSID must not be blank"));
+        }
+
+        // Validate time zone is not blank
+        if self.time_zone.is_empty() {
+            return Err(ValidationError::new(
+                "time_zone",
+                "time zone must not be blank",
+            ));
+        }
+
+        // Validate LED color format: must be #RRGGBB
+        if self.led_color.len() != 7 {
+            return Err(ValidationError::new("led_color", "led color is invalid"));
+        }
+
+        if !self.led_color.starts_with('#') {
+            return Err(ValidationError::new("led_color", "led color is invalid"));
+        }
+
+        // Validate hex characters
+        for c in self.led_color[1..].chars() {
+            if !c.is_ascii_hexdigit() {
+                return Err(ValidationError::new(
+                    "led_color",
+                    "led color contains invalid hex characters",
+                ));
+            }
+        }
+
+        Ok(())
     }
+}
+
+/// Format a u32 color as #RRGGBB hex string
+fn format_color(color: u32) -> String {
+    let mut s = String::with_capacity(7);
+    write!(s, "#{:06x}", color).unwrap();
+    s
+}
+
+/// Parse a #RRGGBB hex string to u32
+fn parse_color(color: &str) -> u32 {
+    let hex = color.trim_start_matches('#');
+    u32::from_str_radix(hex, 16).unwrap_or(0)
 }
 
 impl From<InternalConfig> for Config {
@@ -132,7 +168,7 @@ impl From<InternalConfig> for Config {
             wifi_ssid: item.wifi_ssid,
             wifi_pass: item.wifi_pass,
             time_zone: item.tz,
-            led_color: format!("#{:06x}", item.led_color),
+            led_color: format_color(item.led_color),
             hours_24: item.hours_24,
         }
     }
@@ -144,7 +180,7 @@ impl From<Config> for InternalConfig {
             wifi_ssid: item.wifi_ssid,
             wifi_pass: item.wifi_pass,
             tz: item.time_zone,
-            led_color: u32::from_str_radix(&item.led_color.replace("#", ""), 16).unwrap_or(0),
+            led_color: parse_color(&item.led_color),
             hours_24: item.hours_24,
         }
     }
@@ -170,7 +206,7 @@ impl ConfigStorage {
 
         let mut buf = [0; 256];
         let config = match self.storage.get_raw("config", &mut buf) {
-            Ok(Some(v)) => from_bytes::<InternalConfig>(v).unwrap(),
+            Ok(Some(v)) => from_bytes::<InternalConfig>(v).unwrap_or_default(),
             _ => InternalConfig::default(),
         };
         self.config = Some(config.clone());
@@ -179,8 +215,8 @@ impl ConfigStorage {
     }
 
     pub fn save(&mut self, config: &InternalConfig) -> Result<(), StorageError> {
-        self.storage
-            .set_raw("config", &to_vec::<InternalConfig, 100>(config).unwrap())?;
+        let data = to_vec::<InternalConfig, 100>(config).map_err(|_| StorageError::WriteError)?;
+        self.storage.set_raw("config", &data)?;
 
         self.config = Some(config.clone());
         Ok(())
@@ -189,6 +225,8 @@ impl ConfigStorage {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+
     use crate::storage::InMemoryStorage;
 
     use super::*;
@@ -229,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_internal_config_to_config() {
+    fn it_converts_internal_config_to_config() {
         let config = InternalConfig::new("ssid", "pass", "US/Central", 0x123456, false);
 
         let expected = Config {
@@ -244,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn convert_config_to_internal_config() {
+    fn it_converts_config_to_internal_config() {
         let expected = InternalConfig::new("ssid", "pass", "US/Central", 0x123456, false);
 
         let config = Config {
@@ -259,14 +297,14 @@ mod tests {
     }
 
     #[test]
-    fn valid_config() {
+    fn it_validates_valid_config() {
         let config: Config = Config::new("ssid", "pass", "US/Central", "#123456", false);
 
         assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn validate_wifi_ssid_is_not_blank() {
+    fn it_validates_wifi_ssid_is_not_blank() {
         let config: Config = Config::new(
             "", // Missing SSID
             "pass",
@@ -277,53 +315,38 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .field_errors()
-            .get("wifi_ssid")
-            .is_some());
+        assert_eq!(result.unwrap_err().field, "wifi_ssid");
     }
 
     #[test]
-    fn validate_time_zone_is_not_blank() {
+    fn it_validates_time_zone_is_not_blank() {
         let config: Config = Config::new(
-            "ssid", 
-            "pass", 
-            "", // Missing time zone
-            "#123456",
-            false,
+            "ssid", "pass", "", // Missing time zone
+            "#123456", false,
         );
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .field_errors()
-            .get("time_zone")
-            .is_some());
+        assert_eq!(result.unwrap_err().field, "time_zone");
     }
 
     #[test]
-    fn validate_color_starts_with_hash() {
+    fn it_validates_color_starts_with_hash() {
         let config: Config = Config::new(
             "ssid",
             "pass",
             "US/Central",
-            "123456", // Missing #,
+            "123456", // Missing #
             false,
         );
 
         let result = config.validate();
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .field_errors()
-            .get("led_color")
-            .is_some());
+        assert_eq!(result.unwrap_err().field, "led_color");
     }
 
     #[test]
-    fn validate_color_is_hex_color() {
+    fn it_validates_color_is_hex_color() {
         let config: Config = Config::new(
             "ssid",
             "pass",
@@ -334,7 +357,6 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_err());
-        let error = result.unwrap_err();
-        assert!(error.field_errors().get("led_color").is_some());
+        assert_eq!(result.unwrap_err().field, "led_color");
     }
 }

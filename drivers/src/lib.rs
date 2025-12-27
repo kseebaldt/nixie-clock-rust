@@ -1,3 +1,6 @@
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
 extern crate embedded_hal as hal;
 
 pub mod config;

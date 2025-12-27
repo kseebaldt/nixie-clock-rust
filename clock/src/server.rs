@@ -75,8 +75,10 @@ pub fn create_server(
                     };
                 }
                 Err(e) => {
-                    let j = serde_json::to_string(&e).unwrap();
-                    req.into_status_response(400)?.write_all(j.as_bytes())?;
+                    let error_msg =
+                        format!(r#"{{"field":"{}","message":"{}"}}"#, e.field, e.message);
+                    req.into_status_response(400)?
+                        .write_all(error_msg.as_bytes())?;
                     return Ok(());
                 }
             }
