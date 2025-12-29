@@ -17,6 +17,11 @@ esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32"] }
 esp-println = { version = "0.16.1", features = ["esp32", "log-04"] }
 esp-rtos = { version = "0.2.0", features = ["esp32", "embassy", "esp-radio"] }
 esp-radio = { version = "0.17.0", features = ["esp32", "wifi"] }
+esp-storage = { version = "0.8.1", features = ["esp32", "bytewise-read"] }
+embedded-storage = "0.3"
+embedded-storage-async = "0.4"
+sequential-storage = "7.0"
+embassy-embedded-hal = "0.5"
 
 # Embassy
 embassy-executor = "0.9.0"
@@ -55,9 +60,15 @@ sntpc = { version = "0.7.0", default-features = false, features = ["embassy-sock
 # Serialization
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde-json-core = "0.6"
+postcard = "1.0"
+heapless = "0.7"
 
 [profile.dev]
 opt-level = "s"
+
+# esp-storage requires opt-level 2 or 3 on ESP32 for flash operations to work
+[profile.dev.package.esp-storage]
+opt-level = 3
 
 [profile.release]
 codegen-units    = 1

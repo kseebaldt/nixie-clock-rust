@@ -92,6 +92,7 @@ pub struct Config {
     time_zone: String,
     #[serde(rename = "ledColor")]
     led_color: String,
+    #[serde(rename = "hours24")]
     hours_24: bool,
 }
 

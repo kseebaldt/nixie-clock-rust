@@ -39,10 +39,14 @@ use sntpc::{NtpContext, NtpTimestampGenerator, get_time};
 use static_cell::StaticCell;
 
 use chrono::NaiveDateTime;
+use drivers::config::{Config, InternalConfig};
 use drivers::debouncer::Debouncer;
 use drivers::nixie_display::{DisplayMode, HourFormat, NixieDisplay};
 use drivers::rgb_led::RgbLed;
 use drivers::shift_register::ShiftRegister;
+use postcard::{from_bytes, to_vec};
+
+use clock_no_std::storage::SeqConfigStorage;
 
 extern crate alloc;
 
@@ -57,17 +61,22 @@ const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 type ButtonDebouncer = Debouncer<Input<'static>>;
 type DebouncerMutex = Mutex<CriticalSectionRawMutex, ButtonDebouncer>;
 type DisplayModeMutex = Mutex<CriticalSectionRawMutex, DisplayMode>;
+type ConfigMutex = Mutex<CriticalSectionRawMutex, InternalConfig>;
 
 // Static storage for shared state
 static DEBOUNCER: StaticCell<DebouncerMutex> = StaticCell::new();
 static DISPLAY_MODE: StaticCell<DisplayModeMutex> = StaticCell::new();
+static CONFIG: StaticCell<ConfigMutex> = StaticCell::new();
+
+// Type alias for config storage mutex
+type SeqConfigStorageMutex = Mutex<CriticalSectionRawMutex, SeqConfigStorage<'static>>;
+static CONFIG_STORAGE: StaticCell<SeqConfigStorageMutex> = StaticCell::new();
 
 // NTP server to use for time sync
 const NTP_SERVER: &str = "pool.ntp.org";
 
-// Timezone offset in seconds (e.g., -5 hours for EST = -18000)
-// TODO: Make this configurable
-const TIMEZONE_OFFSET_SECS: i64 = -5 * 3600; // EST
+// Default timezone offset in seconds (e.g., -5 hours for EST = -18000)
+const DEFAULT_TIMEZONE_OFFSET_SECS: i64 = -5 * 3600; // EST
 
 // HTTP server port
 const HTTP_PORT: u16 = 8080;
@@ -235,8 +244,8 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
                     + ((time.sec_fraction() as u64 * USEC_IN_SEC) >> 32);
                 rtc.set_current_time_us(time_us);
 
-                // Calculate local time for display
-                let local_secs = time.sec() as i64 + TIMEZONE_OFFSET_SECS;
+                // Calculate local time for display (using default offset for log)
+                let local_secs = time.sec() as i64 + DEFAULT_TIMEZONE_OFFSET_SECS;
                 let hours = ((local_secs / 3600) % 24 + 24) % 24;
                 let minutes = (local_secs / 60) % 60;
                 let secs = local_secs % 60;
@@ -300,12 +309,30 @@ struct DisplayPins {
     sep2: Output<'static>,
 }
 
+/// Convert timezone string to offset in seconds
+/// This is a simplified implementation that maps common timezone names to offsets
+fn timezone_to_offset(tz: &str) -> i64 {
+    match tz {
+        "US/Eastern" | "America/New_York" => -5 * 3600,
+        "US/Central" | "America/Chicago" => -6 * 3600,
+        "US/Mountain" | "America/Denver" => -7 * 3600,
+        "US/Pacific" | "America/Los_Angeles" => -8 * 3600,
+        "Europe/London" => 0,
+        "Europe/Paris" | "Europe/Berlin" => 3600,
+        "Asia/Tokyo" => 9 * 3600,
+        "Australia/Sydney" => 10 * 3600,
+        "UTC" => 0,
+        _ => DEFAULT_TIMEZONE_OFFSET_SECS, // Default to EST
+    }
+}
+
 /// Display task - updates the nixie display based on current time
 #[embassy_executor::task]
 async fn display_task(
     rtc: &'static Rtc<'static>,
     debouncer: &'static DebouncerMutex,
     display_mode: &'static DisplayModeMutex,
+    config: &'static ConfigMutex,
     mut pins: DisplayPins,
 ) {
     let mut shift_register = ShiftRegister::new(&mut pins.data, &mut pins.clock, &mut pins.latch);
@@ -344,16 +371,17 @@ async fn display_task(
             println!("Display mode changed to {:?}", *mode);
         }
 
-        // Get current display mode
-        let mode = {
-            let guard = display_mode.lock().await;
-            *guard
+        // Get current display mode and timezone offset
+        let (mode, tz_offset) = {
+            let mode_guard = display_mode.lock().await;
+            let config_guard = config.lock().await;
+            (*mode_guard, timezone_to_offset(config_guard.tz()))
         };
         display.set_mode(mode);
 
         // Get current time from RTC (set by NTP sync task)
         let rtc_us = rtc.current_time_us();
-        let total_secs = (rtc_us / 1_000_000) as i64 + TIMEZONE_OFFSET_SECS;
+        let total_secs = (rtc_us / 1_000_000) as i64 + tz_offset;
 
         // Convert Unix timestamp to date/time components
         let days = total_secs / 86400;
@@ -400,6 +428,47 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     println!("Embassy initialized!");
+
+    // =========================================================================
+    // Flash Storage & Config Setup
+    // =========================================================================
+
+    // Create the sequential storage instance
+    let seq_storage = SeqConfigStorage::new(peripherals.FLASH);
+    let config_storage = CONFIG_STORAGE.init(Mutex::new(seq_storage));
+
+    // Load config from flash (async operation)
+    let app_config = {
+        let mut storage = config_storage.lock().await;
+        let mut buf = [0u8; 256];
+        match storage.load(&mut buf).await {
+            Some(len) => {
+                // Deserialize the config using postcard
+                match from_bytes::<InternalConfig>(&buf[..len]) {
+                    Ok(cfg) => {
+                        println!("Config loaded from flash: {:?}", cfg);
+                        cfg
+                    }
+                    Err(e) => {
+                        println!("Failed to deserialize config: {:?}, using defaults", e);
+                        InternalConfig::default()
+                    }
+                }
+            }
+            None => {
+                // Flash may be corrupted or uninitialized - erase and start fresh
+                println!("No config in flash or error, erasing storage area...");
+                if let Err(e) = storage.erase_all().await {
+                    println!("Failed to erase storage: {:?}", e);
+                }
+                println!("Using defaults");
+                InternalConfig::default()
+            }
+        }
+    };
+
+    // Store config in static for sharing between tasks
+    let config = CONFIG.init(Mutex::new(app_config.clone()));
 
     // =========================================================================
     // WiFi Setup (AP + STA mode for both internet access and local server)
@@ -528,9 +597,13 @@ async fn main(spawner: Spawner) -> ! {
         .expect("Failed to configure blue channel");
 
     let mut rgb = RgbLed::new(red_channel, green_channel, blue_channel);
-    rgb.set_color(0x000088).expect("Failed to set RGB color");
+    rgb.set_color(app_config.led_color())
+        .expect("Failed to set RGB color");
 
-    println!("RGB LED initialized");
+    println!(
+        "RGB LED initialized with color: #{:06x}",
+        app_config.led_color()
+    );
 
     // =========================================================================
     // Initialize shared state
@@ -552,7 +625,13 @@ async fn main(spawner: Spawner) -> ! {
         sep2,
     };
     spawner
-        .spawn(display_task(rtc, debouncer, display_mode, display_pins))
+        .spawn(display_task(
+            rtc,
+            debouncer,
+            display_mode,
+            config,
+            display_pins,
+        ))
         .ok();
     println!("Display task spawned");
 
@@ -704,9 +783,13 @@ async fn main(spawner: Spawner) -> ! {
 
         println!("HTTP: Client connected via {}!", interface_name);
 
-        // Read request
-        let mut buffer = [0u8; 1024];
+        // Read request (headers + body for POST)
+        let mut buffer = [0u8; 2048];
         let mut pos = 0;
+        let mut header_end = 0;
+        let mut content_length: usize = 0;
+
+        // Read until we have all headers
         loop {
             match socket.read(&mut buffer[pos..]).await {
                 Ok(0) => {
@@ -716,7 +799,17 @@ async fn main(spawner: Spawner) -> ! {
                 Ok(len) => {
                     pos += len;
                     // Check for end of HTTP headers
-                    if buffer[..pos].windows(4).any(|w| w == b"\r\n\r\n") {
+                    if let Some(idx) = buffer[..pos].windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = idx + 4;
+                        // Parse Content-Length from headers
+                        let headers = core::str::from_utf8(&buffer[..header_end]).unwrap_or("");
+                        for line in headers.lines() {
+                            if line.to_ascii_lowercase().starts_with("content-length:")
+                                && let Some(len_str) = line.split(':').nth(1)
+                            {
+                                content_length = len_str.trim().parse().unwrap_or(0);
+                            }
+                        }
                         break;
                     }
                     if pos >= buffer.len() {
@@ -730,30 +823,128 @@ async fn main(spawner: Spawner) -> ! {
             }
         }
 
-        // Parse request
-        let request = core::str::from_utf8(&buffer[..pos]).unwrap_or("");
-        let path = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/");
+        // Read body if Content-Length indicates more data
+        let body_so_far = pos - header_end;
+        if content_length > 0 && body_so_far < content_length {
+            let remaining = content_length - body_so_far;
+            let to_read = remaining.min(buffer.len() - pos);
+            if to_read > 0 {
+                match socket.read(&mut buffer[pos..pos + to_read]).await {
+                    Ok(n) => pos += n,
+                    Err(e) => println!("HTTP: Body read error: {:?}", e),
+                }
+            }
+        }
 
-        println!("HTTP: Request for {}", path);
+        // Parse request line
+        let request = core::str::from_utf8(&buffer[..header_end]).unwrap_or("");
+        let first_line = request.lines().next().unwrap_or("");
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next().unwrap_or("GET");
+        let path = parts.next().unwrap_or("/");
+
+        // Extract body for POST requests
+        let body = if header_end < pos {
+            core::str::from_utf8(&buffer[header_end..pos]).unwrap_or("")
+        } else {
+            ""
+        };
+
+        println!("HTTP: {} {} (body: {} bytes)", method, path, body.len());
 
         // Send response
-        let response = match path {
-            "/" => {
+        let response = match (method, path) {
+            ("GET", "/") => {
                 let header = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n";
                 let _ = socket.write_all(header.as_bytes()).await;
                 let _ = socket.write_all(INDEX_HTML.as_bytes()).await;
                 "index"
             }
-            "/config" => {
-                let body = "{\"timezone\":\"-5\",\"color\":\"#00ff00\",\"hour_format\":\"12\"}";
-                let header = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n";
-                let _ = socket.write_all(header.as_bytes()).await;
-                let _ = socket.write_all(body.as_bytes()).await;
-                "config"
+            ("GET", "/config") => {
+                // Get current config from mutex and convert to JSON-friendly Config
+                let current_config = config.lock().await;
+                let json_config: Config = (*current_config).clone().into();
+                drop(current_config);
+
+                // Serialize to JSON
+                let mut json_buf = [0u8; 512];
+                match serde_json_core::to_slice(&json_config, &mut json_buf) {
+                    Ok(len) => {
+                        let header = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n";
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(&json_buf[..len]).await;
+                    }
+                    Err(e) => {
+                        println!("HTTP: JSON serialize error: {:?}", e);
+                        let header = "HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nJSON error";
+                        let _ = socket.write_all(header.as_bytes()).await;
+                    }
+                }
+                "config GET"
+            }
+            ("POST", "/config") => {
+                // Parse JSON body
+                match serde_json_core::from_str::<Config>(body) {
+                    Ok((new_config, _)) => {
+                        // Validate config
+                        if let Err(e) = new_config.validate() {
+                            println!("HTTP: Config validation error: {} - {}", e.field, e.message);
+                            let error_body = "{\"error\":\"validation failed\"}";
+                            let header = "HTTP/1.0 400 Bad Request\r\nContent-Type: application/json\r\n\r\n";
+                            let _ = socket.write_all(header.as_bytes()).await;
+                            let _ = socket.write_all(error_body.as_bytes()).await;
+                        } else {
+                            // Convert to internal config
+                            let internal_config: InternalConfig = new_config.into();
+
+                            // Serialize config using postcard
+                            let serialized: heapless::Vec<u8, 256> = match to_vec(&internal_config)
+                            {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    println!("HTTP: Failed to serialize config: {:?}", e);
+                                    let header = "HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nSerialization error";
+                                    let _ = socket.write_all(header.as_bytes()).await;
+                                    continue;
+                                }
+                            };
+
+                            // Save to flash storage
+                            let mut storage_guard = config_storage.lock().await;
+                            match storage_guard.save(&serialized).await {
+                                Ok(()) => {
+                                    println!("HTTP: Config saved to flash");
+                                }
+                                Err(e) => {
+                                    println!("HTTP: Failed to save config to flash: {:?}", e);
+                                }
+                            }
+                            drop(storage_guard);
+
+                            // Update the shared config mutex
+                            let mut cfg_guard = config.lock().await;
+                            *cfg_guard = internal_config.clone();
+                            drop(cfg_guard);
+
+                            println!("HTTP: Config updated: {:?}", internal_config);
+
+                            // Send success response
+                            let header =
+                                "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n";
+                            let _ = socket.write_all(header.as_bytes()).await;
+                            let _ = socket.write_all(b"{\"status\":\"ok\"}").await;
+                        }
+                    }
+                    Err(e) => {
+                        println!("HTTP: JSON parse error: {:?}", e);
+                        let error_body = "{\"error\":\"invalid JSON\"}";
+                        let header =
+                            "HTTP/1.0 400 Bad Request\r\nContent-Type: application/json\r\n\r\n";
+                        let _ = socket.write_all(header.as_bytes()).await;
+                        let _ = socket.write_all(error_body.as_bytes()).await;
+                    }
+                }
+                "config POST"
             }
             _ => {
                 let header = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot Found";

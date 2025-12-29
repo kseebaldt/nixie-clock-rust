@@ -19,7 +19,12 @@
 
   onMount(async () => {
     const res = await fetch("/config");
-    config = await res.json();
+    const data = await res.json();
+    // Ensure hours24 is a boolean (server might send string)
+    config = {
+      ...data,
+      hours24: data.hours24 === true || data.hours24 === "true"
+    };
     console.log(config);
   });
 
