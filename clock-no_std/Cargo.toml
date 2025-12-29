@@ -8,65 +8,39 @@ version      = "0.1.0"
 name = "clock-no_std"
 path = "./src/bin/main.rs"
 
+[features]
+default = []
+wifi = ["esp-rtos/esp-radio", "dep:esp-radio", "dep:embassy-net"]
+
 [dependencies]
-esp-hal = { version = "~1.0", features = ["defmt", "esp32", "unstable"] }
+# ESP-HAL ecosystem (crates.io versions)
+esp-hal = { version = "1.0.0", features = ["esp32", "unstable"] }
+esp-alloc = { version = "0.9.0" }
+esp-backtrace = { version = "0.18.1", features = ["esp32", "panic-handler", "println"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32"] }
+esp-println = { version = "0.16.1", features = ["esp32", "log-04"] }
+esp-rtos = { version = "0.2.0", features = ["esp32", "embassy"] }
+esp-radio = { version = "0.17.0", features = ["esp32", "wifi"], optional = true }
 
-esp-rtos = { version = "0.2.0", features = [
-  "defmt",
-  "embassy",
-  "esp-alloc",
-  "esp-radio",
-  "esp32",
-] }
-
-defmt                  = "1.0.1"
-esp-bootloader-esp-idf = { version = "0.4.0", features = ["defmt", "esp32"] }
-
-embassy-net = { version = "0.7.1", features = [
-  "defmt",
+# Embassy
+embassy-executor = "0.9.0"
+embassy-net = { version = "0.7.0", features = [
   "dhcpv4",
   "medium-ethernet",
   "tcp",
   "udp",
-] }
-embedded-hal = "1.0.0"
-embedded-io = { version = "0.7.1", features = ["defmt"] }
-embedded-io-async = { version = "0.7.0", features = ["defmt"] }
-esp-alloc = { version = "0.9.0", features = ["defmt"] }
-esp-backtrace = { version = "0.18.1", features = [
-  "defmt",
-  "esp32",
-  "panic-handler",
-] }
-esp-println = { version = "0.16.1", features = ["defmt-espflash", "esp32"] }
-# for more networking protocol support see https://crates.io/crates/edge-net
-embassy-executor = { version = "0.9.1", features = ["defmt"] }
-embassy-time = { version = "0.5.0", features = ["defmt"] }
-esp-radio = { version = "0.17.0", features = [
-  "defmt",
-  "esp-alloc",
-  "esp32",
-  "smoltcp",
-  "unstable",
-  "wifi",
-] }
-smoltcp = { version = "0.12.0", default-features = false, features = [
-  "defmt",
-  "medium-ethernet",
-  "multicast",
-  "proto-dhcpv4",
-  "proto-dns",
-  "proto-ipv4",
-  "socket-dns",
-  "socket-icmp",
-  "socket-raw",
-  "socket-tcp",
-  "socket-udp",
-] }
+], optional = true }
+embassy-time = "0.5.0"
+embassy-sync = "0.6"
 
+# Embedded
+embedded-hal = "1.0.0"
+embedded-io-async = "0.6.1"
+
+# Other dependencies
+defmt = "1.0.1"
+static_cell = "2.1.0"
 critical-section = "1.2.0"
-static_cell      = "2.1.1"
-embassy-sync     = "0.6"
 
 # Local crates
 drivers = { path = "../drivers", default-features = false }
@@ -77,14 +51,11 @@ chrono = { version = "0.4", default-features = false }
 # Serialization
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 
-
 [profile.dev]
-# Rust debug is too slow.
-# For debug builds always builds with some optimization
 opt-level = "s"
 
 [profile.release]
-codegen-units    = 1     # LLVM can perform better optimizations using a single thread
+codegen-units    = 1
 debug            = 2
 debug-assertions = false
 incremental      = false
