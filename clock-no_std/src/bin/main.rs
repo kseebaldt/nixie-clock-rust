@@ -3,9 +3,10 @@
 
 use core::net::{IpAddr, SocketAddr};
 
+use edge_nal::UdpBind;
 use embassy_executor::Spawner;
 use embassy_net::{
-    Runner, Stack, StackResources,
+    Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
     dns::DnsQueryType,
     udp::{PacketMetadata, UdpSocket},
 };
@@ -23,6 +24,7 @@ use esp_hal::{
         channel::{self, ChannelIFace},
         timer::{self, TimerIFace},
     },
+    ram,
     rng::Rng,
     rtc_cntl::Rtc,
     time::Rate,
@@ -30,14 +32,15 @@ use esp_hal::{
 };
 use esp_println::println;
 use esp_radio::wifi::{
-    ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
+    AccessPointConfig, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent,
 };
+
 use sntpc::{NtpContext, NtpTimestampGenerator, get_time};
 use static_cell::StaticCell;
 
 use chrono::NaiveDateTime;
 use drivers::debouncer::Debouncer;
-use drivers::nixie_display::{HourFormat, NixieDisplay};
+use drivers::nixie_display::{DisplayMode, HourFormat, NixieDisplay};
 use drivers::rgb_led::RgbLed;
 use drivers::shift_register::ShiftRegister;
 
@@ -53,9 +56,11 @@ const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 // Type aliases for cleaner code
 type ButtonDebouncer = Debouncer<Input<'static>>;
 type DebouncerMutex = Mutex<CriticalSectionRawMutex, ButtonDebouncer>;
+type DisplayModeMutex = Mutex<CriticalSectionRawMutex, DisplayMode>;
 
 // Static storage for shared state
 static DEBOUNCER: StaticCell<DebouncerMutex> = StaticCell::new();
+static DISPLAY_MODE: StaticCell<DisplayModeMutex> = StaticCell::new();
 
 // NTP server to use for time sync
 const NTP_SERVER: &str = "pool.ntp.org";
@@ -63,6 +68,12 @@ const NTP_SERVER: &str = "pool.ntp.org";
 // Timezone offset in seconds (e.g., -5 hours for EST = -18000)
 // TODO: Make this configurable
 const TIMEZONE_OFFSET_SECS: i64 = -5 * 3600; // EST
+
+// HTTP server port
+const HTTP_PORT: u16 = 8080;
+
+// Embedded webapp HTML
+static INDEX_HTML: &str = include_str!("../../../webapp/dist/index.html");
 
 // When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
 macro_rules! mk_static {
@@ -85,10 +96,56 @@ async fn debounce_task(debouncer: &'static DebouncerMutex) {
     }
 }
 
-/// Task to run the embassy-net network stack
-#[embassy_executor::task]
+/// Task to run the embassy-net network stack (pool_size=2 for AP and STA)
+#[embassy_executor::task(pool_size = 2)]
 async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
+}
+
+/// DHCP server task for AP mode - allows clients to get an IP address
+#[embassy_executor::task]
+async fn dhcp_server_task(stack: Stack<'static>) {
+    use core::net::{Ipv4Addr, SocketAddrV4};
+    use edge_dhcp::{
+        io::{self, DEFAULT_SERVER_PORT},
+        server::{Server, ServerOptions},
+    };
+    use edge_nal_embassy::{Udp, UdpBuffers};
+
+    let ip = Ipv4Addr::new(192, 168, 4, 1);
+
+    let mut buf = [0u8; 1500];
+    let mut gw_buf = [Ipv4Addr::UNSPECIFIED];
+
+    let buffers = UdpBuffers::<3, 1024, 1024, 10>::new();
+    let unbound_socket = Udp::new(stack, &buffers);
+    let mut bound_socket = match unbound_socket
+        .bind(core::net::SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            DEFAULT_SERVER_PORT,
+        )))
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            println!("DHCP: Failed to bind socket: {:?}", e);
+            return;
+        }
+    };
+
+    println!("DHCP: Server started on 192.168.4.1");
+
+    loop {
+        _ = io::server::run(
+            &mut Server::<_, 64>::new_with_et(ip),
+            &ServerOptions::new(ip, Some(&mut gw_buf)),
+            &mut bound_socket,
+            &mut buf,
+        )
+        .await
+        .inspect_err(|e| println!("DHCP server error: {:?}", e));
+        Timer::after(Duration::from_millis(500)).await;
+    }
 }
 
 /// Timestamp generator for sntpc using the ESP32 RTC
@@ -165,7 +222,7 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
             continue;
         }
 
-        // Perform NTP request
+        // Perform NTP request using sntpc
         let context = NtpContext::new(RtcTimestamp {
             current_time_us: rtc.current_time_us(),
         });
@@ -202,48 +259,125 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
     }
 }
 
-/// Task to manage WiFi connection and reconnection
+/// Task to manage WiFi connection and reconnection (AP+STA mode)
 #[embassy_executor::task]
 async fn connection(mut controller: WifiController<'static>) {
     println!("start connection task");
     println!("Device capabilities: {:?}", controller.capabilities());
 
+    println!("Starting wifi (AP+STA mode)");
+    controller.start_async().await.unwrap();
+    println!("Wifi started!");
+
     loop {
-        if esp_radio::wifi::sta_state() == WifiStaState::Connected {
-            // Wait for disconnection
-            controller.wait_for_event(WifiEvent::StaDisconnected).await;
-            Timer::after(Duration::from_millis(5000)).await;
+        match esp_radio::wifi::ap_state() {
+            esp_radio::wifi::WifiApState::Started => {
+                println!("About to connect to STA...");
+                match controller.connect_async().await {
+                    Ok(_) => {
+                        println!("STA connected!");
+                        // Wait for disconnection
+                        controller.wait_for_event(WifiEvent::StaDisconnected).await;
+                        println!("STA disconnected");
+                    }
+                    Err(e) => {
+                        println!("Failed to connect to wifi: {e:?}");
+                        Timer::after(Duration::from_millis(5000)).await
+                    }
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// GPIO pins for the display
+struct DisplayPins {
+    data: Output<'static>,
+    clock: Output<'static>,
+    latch: Output<'static>,
+    sep1: Output<'static>,
+    sep2: Output<'static>,
+}
+
+/// Display task - updates the nixie display based on current time
+#[embassy_executor::task]
+async fn display_task(
+    rtc: &'static Rtc<'static>,
+    debouncer: &'static DebouncerMutex,
+    display_mode: &'static DisplayModeMutex,
+    mut pins: DisplayPins,
+) {
+    let mut shift_register = ShiftRegister::new(&mut pins.data, &mut pins.clock, &mut pins.latch);
+    let mut display = NixieDisplay::new(&mut shift_register, pins.sep1, pins.sep2);
+    display.set_hour_format(HourFormat::TwelveHour);
+
+    let mut button_hold_counter: u8 = 0;
+    let mut ticker = Ticker::every(Duration::from_millis(200));
+    let mut last_log_second: u32 = 0;
+
+    println!("Display task started");
+
+    loop {
+        ticker.next().await;
+
+        // Check button state for mode switching
+        let button_pressed = {
+            let mut guard = debouncer.lock().await;
+            guard.is_low().unwrap_or(false)
+        };
+
+        if button_pressed {
+            button_hold_counter = (button_hold_counter + 1) % 5;
+        } else {
+            button_hold_counter = 0;
         }
 
-        if !matches!(controller.is_started(), Ok(true)) {
-            let client_config = ModeConfig::Client(
-                ClientConfig::default()
-                    .with_ssid(WIFI_SSID.into())
-                    .with_password(WIFI_PASSWORD.into()),
-            );
-            controller.set_config(&client_config).unwrap();
-            println!("Starting wifi");
-            controller.start_async().await.unwrap();
-            println!("Wifi started!");
-
-            println!("Scan");
-            let scan_config = ScanConfig::default().with_max(10);
-            let result = controller
-                .scan_with_config_async(scan_config)
-                .await
-                .unwrap();
-            for ap in result {
-                println!("{:?}", ap);
-            }
+        // Switch mode on first detection of button press
+        if button_hold_counter == 1 {
+            let mut mode = display_mode.lock().await;
+            *mode = match *mode {
+                DisplayMode::Time => DisplayMode::Date,
+                DisplayMode::Date => DisplayMode::Year,
+                DisplayMode::Year => DisplayMode::Time,
+            };
+            println!("Display mode changed to {:?}", *mode);
         }
 
-        println!("About to connect...");
-        match controller.connect_async().await {
-            Ok(_) => println!("Wifi connected!"),
-            Err(e) => {
-                println!("Failed to connect to wifi: {e:?}");
-                Timer::after(Duration::from_millis(5000)).await
-            }
+        // Get current display mode
+        let mode = {
+            let guard = display_mode.lock().await;
+            *guard
+        };
+        display.set_mode(mode);
+
+        // Get current time from RTC (set by NTP sync task)
+        let rtc_us = rtc.current_time_us();
+        let total_secs = (rtc_us / 1_000_000) as i64 + TIMEZONE_OFFSET_SECS;
+
+        // Convert Unix timestamp to date/time components
+        let days = total_secs / 86400;
+        let time_of_day = ((total_secs % 86400) + 86400) % 86400;
+
+        let hours = (time_of_day / 3600) as u32;
+        let minutes = ((time_of_day % 3600) / 60) as u32;
+        let seconds = (time_of_day % 60) as u32;
+
+        let (year, month, day) = days_to_ymd(days as i32);
+
+        let datetime = NaiveDateTime::new(
+            chrono::NaiveDate::from_ymd_opt(year, month, day)
+                .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
+            chrono::NaiveTime::from_hms_opt(hours, minutes, seconds)
+                .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
+        );
+
+        display.display(datetime);
+
+        // Log every 5 seconds
+        if seconds.is_multiple_of(5) && seconds != last_log_second {
+            println!("Time: {:02}:{:02}:{:02}", hours, minutes, seconds);
+            last_log_second = seconds;
         }
     }
 }
@@ -253,7 +387,8 @@ async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 36 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
@@ -267,48 +402,77 @@ async fn main(spawner: Spawner) -> ! {
     println!("Embassy initialized!");
 
     // =========================================================================
-    // WiFi Setup
+    // WiFi Setup (AP + STA mode for both internet access and local server)
     // =========================================================================
 
-    let stack = {
+    let (ap_stack, sta_stack) = {
         println!("Initializing WiFi...");
         let esp_radio_ctrl =
             &*mk_static!(esp_radio::Controller<'static>, esp_radio::init().unwrap());
-        let (controller, interfaces) =
+        let (mut controller, interfaces) =
             esp_radio::wifi::new(esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
 
-        let wifi_interface = interfaces.sta;
+        let wifi_ap_device = interfaces.ap;
+        let wifi_sta_device = interfaces.sta;
 
         println!("WiFi controller initialized");
 
-        // Create network stack
-        let net_config = embassy_net::Config::dhcpv4(Default::default());
+        // AP config with static IP
+        let ap_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
+            address: Ipv4Cidr::new(core::net::Ipv4Addr::new(192, 168, 4, 1), 24),
+            gateway: Some(core::net::Ipv4Addr::new(192, 168, 4, 1)),
+            dns_servers: Default::default(),
+        });
+
+        // STA config with DHCP
+        let sta_config = embassy_net::Config::dhcpv4(Default::default());
+
         let rng = Rng::new();
         let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-        let (stack, runner) = embassy_net::new(
-            wifi_interface,
-            net_config,
+        // Create both network stacks
+        let (ap_stack, ap_runner) = embassy_net::new(
+            wifi_ap_device,
+            ap_config,
             mk_static!(StackResources<3>, StackResources::<3>::new()),
             seed,
         );
+        let (sta_stack, sta_runner) = embassy_net::new(
+            wifi_sta_device,
+            sta_config,
+            mk_static!(StackResources<5>, StackResources::<5>::new()),
+            seed,
+        );
+
+        // Configure AP+STA mode
+        let client_config = ModeConfig::ApSta(
+            ClientConfig::default()
+                .with_ssid(WIFI_SSID.into())
+                .with_password(WIFI_PASSWORD.into()),
+            AccessPointConfig::default().with_ssid("nixie-clock".into()),
+        );
+        controller.set_config(&client_config).unwrap();
 
         // Spawn network tasks
         spawner.spawn(connection(controller)).ok();
-        spawner.spawn(net_task(runner)).ok();
+        spawner.spawn(net_task(ap_runner)).ok();
+        spawner.spawn(net_task(sta_runner)).ok();
 
-        println!("Network tasks spawned");
-        stack
+        println!("Network tasks spawned (AP+STA mode)");
+        (ap_stack, sta_stack)
     };
+
+    // Spawn DHCP server for AP mode (so clients can get an IP)
+    spawner.spawn(dhcp_server_task(ap_stack)).ok();
 
     // =========================================================================
     // GPIO Setup
     // =========================================================================
 
     // Shift register pins
-    let mut data_pin = Output::new(peripherals.GPIO16, Level::Low, OutputConfig::default());
-    let mut clock_pin = Output::new(peripherals.GPIO17, Level::Low, OutputConfig::default());
-    let mut latch_pin = Output::new(peripherals.GPIO18, Level::Low, OutputConfig::default());
+    let data_pin = Output::new(peripherals.GPIO16, Level::Low, OutputConfig::default());
+    let clock_pin = Output::new(peripherals.GPIO17, Level::Low, OutputConfig::default());
+    let latch_pin = Output::new(peripherals.GPIO18, Level::Low, OutputConfig::default());
 
     // Separator LEDs
     let sep1 = Output::new(peripherals.GPIO4, Level::Low, OutputConfig::default());
@@ -327,7 +491,6 @@ async fn main(spawner: Spawner) -> ! {
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
-    // Configure timer at 5kHz with 8-bit resolution
     let mut lstimer0 = ledc.timer::<LowSpeed>(timer::Number::Timer0);
     lstimer0
         .configure(timer::config::Config {
@@ -337,176 +500,280 @@ async fn main(spawner: Spawner) -> ! {
         })
         .expect("Failed to configure LEDC timer");
 
-    // Configure RGB channels (active-low for common anode LED)
-    // Red on GPIO27, Channel0
     let mut red_channel = ledc.channel(channel::Number::Channel0, peripherals.GPIO27);
     red_channel
         .configure(channel::config::Config {
             timer: &lstimer0,
-            duty_pct: 100, // Start off (inverted)
+            duty_pct: 100,
             drive_mode: DriveMode::PushPull,
         })
         .expect("Failed to configure red channel");
 
-    // Green on GPIO26, Channel1
     let mut green_channel = ledc.channel(channel::Number::Channel1, peripherals.GPIO26);
     green_channel
         .configure(channel::config::Config {
             timer: &lstimer0,
-            duty_pct: 100, // Start off (inverted)
+            duty_pct: 100,
             drive_mode: DriveMode::PushPull,
         })
         .expect("Failed to configure green channel");
 
-    // Blue on GPIO25, Channel2
     let mut blue_channel = ledc.channel(channel::Number::Channel2, peripherals.GPIO25);
     blue_channel
         .configure(channel::config::Config {
             timer: &lstimer0,
-            duty_pct: 100, // Start off (inverted)
+            duty_pct: 100,
             drive_mode: DriveMode::PushPull,
         })
         .expect("Failed to configure blue channel");
 
-    // Create RGB LED driver
     let mut rgb = RgbLed::new(red_channel, green_channel, blue_channel);
-
-    // Set initial color (blue - indicates not connected)
     rgb.set_color(0x000088).expect("Failed to set RGB color");
 
     println!("RGB LED initialized");
 
     // =========================================================================
-    // Initialize drivers
+    // Initialize shared state
     // =========================================================================
 
-    // Create shift register and display
-    let mut shift_register = ShiftRegister::new(&mut data_pin, &mut clock_pin, &mut latch_pin);
-    let mut display = NixieDisplay::new(&mut shift_register, sep1, sep2);
-    display.set_hour_format(HourFormat::TwelveHour);
-
-    println!("Display initialized");
-
-    // Create button debouncer with shared state
     let debouncer = DEBOUNCER.init(Mutex::new(Debouncer::new(0.1, 100, button_pin)));
+    let display_mode = DISPLAY_MODE.init(Mutex::new(DisplayMode::Time));
 
     // Spawn debounce task
     spawner.spawn(debounce_task(debouncer)).ok();
-
     println!("Debouncer task spawned");
 
+    // Spawn display task
+    let display_pins = DisplayPins {
+        data: data_pin,
+        clock: clock_pin,
+        latch: latch_pin,
+        sep1,
+        sep2,
+    };
+    spawner
+        .spawn(display_task(rtc, debouncer, display_mode, display_pins))
+        .ok();
+    println!("Display task spawned");
+
     // =========================================================================
-    // Wait for WiFi connection and get IP
+    // Wait for WiFi connection (both AP and STA)
     // =========================================================================
 
+    // Wait for AP to be ready (should be immediate with static IP)
+    println!("Waiting for AP interface...");
     loop {
-        if stack.is_link_up() {
+        let ap_state = esp_radio::wifi::ap_state();
+        println!(
+            "AP state: {:?}, link_up: {}, config_up: {}",
+            ap_state,
+            ap_stack.is_link_up(),
+            ap_stack.is_config_up()
+        );
+        if ap_stack.is_link_up() && ap_stack.is_config_up() {
+            if let Some(config) = ap_stack.config_v4() {
+                println!("AP ready at: {}", config.address);
+            }
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    println!("Waiting to get IP address...");
+    // Wait for STA to connect and get DHCP
+    println!("Waiting for STA to connect...");
     loop {
-        if let Some(config) = stack.config_v4() {
-            println!("Got IP: {}", config.address);
-            // Change LED to green to indicate connected
+        if sta_stack.is_link_up() {
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
+    println!("STA connected, waiting for DHCP...");
+    loop {
+        if let Some(config) = sta_stack.config_v4() {
+            println!("STA got IP: {}", config.address);
             rgb.set_color(0x008800).expect("Failed to set RGB color");
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
     }
 
-    println!("WiFi connected with IP, starting NTP sync");
+    // Wait for STA network config to be fully up
+    println!("Waiting for STA network config to be up...");
+    while !sta_stack.is_config_up() {
+        Timer::after(Duration::from_millis(100)).await;
+    }
+    println!("STA network config is up!");
 
-    // Spawn NTP sync task
-    spawner.spawn(ntp_sync_task(stack, rtc)).ok();
+    println!("WiFi connected with IP, starting services");
+
+    // Spawn NTP sync task (uses STA stack for internet access)
+    spawner.spawn(ntp_sync_task(sta_stack, rtc)).ok();
 
     // =========================================================================
-    // Main display loop
+    // HTTP Server (runs in main)
     // =========================================================================
 
-    let mut button_hold_counter: u8 = 0;
-    let mut ticker = Ticker::every(Duration::from_millis(200));
-    let mut last_log_second: u32 = 0;
-    let mut last_wifi_status = true; // We started connected
+    // Test outbound TCP connection first (using STA stack)
+    println!("Testing outbound TCP connection via STA...");
+    {
+        use core::net::Ipv4Addr;
+        use embassy_net::tcp::TcpSocket;
+        use embedded_io_async::Write;
 
-    println!("Starting main loop");
+        let mut rx_buffer = [0; 1024];
+        let mut tx_buffer = [0; 1024];
+        let mut socket = TcpSocket::new(sta_stack, &mut rx_buffer, &mut tx_buffer);
+        socket.set_timeout(Some(Duration::from_secs(10)));
+
+        // Try to connect to a known server (Google)
+        let remote = (Ipv4Addr::new(142, 250, 185, 115), 80);
+        println!("Connecting to {:?}...", remote);
+        match socket.connect(remote).await {
+            Ok(_) => {
+                println!("Connected! TCP outbound works.");
+                let _ = socket
+                    .write_all(b"GET / HTTP/1.0\r\nHost: www.google.com\r\n\r\n")
+                    .await;
+                let mut buf = [0; 256];
+                if let Ok(n) = socket.read(&mut buf).await {
+                    println!("Got {} bytes response", n);
+                }
+            }
+            Err(e) => println!("Connect failed: {:?}", e),
+        }
+        socket.abort();
+    }
+
+    // Print connection info
+    println!("HTTP: Starting web server on port {}", HTTP_PORT);
+    println!(
+        "HTTP: Connect to 'nixie-clock' WiFi and browse to http://192.168.4.1:{}",
+        HTTP_PORT
+    );
+    if let Some(cfg) = sta_stack.config_v4() {
+        println!(
+            "HTTP: Or use your home network and browse to http://{}:{}",
+            cfg.address.address(),
+            HTTP_PORT
+        );
+    }
+
+    // Run HTTP server listening on both AP and STA interfaces
+    use embassy_futures::select::Either;
+    use embassy_net::IpListenEndpoint;
+    use embassy_net::tcp::TcpSocket;
+    use embedded_io_async::Write;
+
+    // Separate buffers for AP and STA sockets
+    let mut ap_rx_buffer = [0; 4096];
+    let mut ap_tx_buffer = [0; 4096];
+    let mut sta_rx_buffer = [0; 4096];
+    let mut sta_tx_buffer = [0; 4096];
+
+    let mut ap_socket = TcpSocket::new(ap_stack, &mut ap_rx_buffer, &mut ap_tx_buffer);
+    ap_socket.set_timeout(Some(Duration::from_secs(30)));
+
+    let mut sta_socket = TcpSocket::new(sta_stack, &mut sta_rx_buffer, &mut sta_tx_buffer);
+    sta_socket.set_timeout(Some(Duration::from_secs(30)));
 
     loop {
-        ticker.next().await;
+        println!("HTTP: Waiting for connection on AP or STA...");
 
-        // Update WiFi status LED
-        let current_wifi_status = stack.is_link_up();
-        if current_wifi_status != last_wifi_status {
-            if current_wifi_status {
-                rgb.set_color(0x008800).ok(); // Green = connected
-                println!("WiFi reconnected");
-            } else {
-                rgb.set_color(0x880000).ok(); // Red = disconnected
-                println!("WiFi disconnected");
-            }
-            last_wifi_status = current_wifi_status;
-        }
-
-        // Check button state for mode switching
-        let button_pressed = {
-            let mut guard = debouncer.lock().await;
-            guard.is_low().unwrap_or(false)
+        // Wait for connection on either AP or STA interface
+        let listen_endpoint = IpListenEndpoint {
+            addr: None,
+            port: HTTP_PORT,
         };
 
-        if button_pressed {
-            button_hold_counter = (button_hold_counter + 1) % 5;
-        } else {
-            button_hold_counter = 0;
+        let either_socket = embassy_futures::select::select(
+            ap_socket.accept(listen_endpoint),
+            sta_socket.accept(listen_endpoint),
+        )
+        .await;
+
+        let (r, socket, interface_name) = match either_socket {
+            Either::First(r) => (r, &mut ap_socket, "AP"),
+            Either::Second(r) => (r, &mut sta_socket, "STA"),
+        };
+
+        if let Err(e) = r {
+            println!("HTTP: Accept error on {}: {:?}", interface_name, e);
+            continue;
         }
 
-        // Switch mode on first detection of button press
-        if button_hold_counter == 1 {
-            display.next_mode();
-            println!("Display mode changed");
+        println!("HTTP: Client connected via {}!", interface_name);
+
+        // Read request
+        let mut buffer = [0u8; 1024];
+        let mut pos = 0;
+        loop {
+            match socket.read(&mut buffer[pos..]).await {
+                Ok(0) => {
+                    println!("HTTP: read EOF");
+                    break;
+                }
+                Ok(len) => {
+                    pos += len;
+                    // Check for end of HTTP headers
+                    if buffer[..pos].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                    if pos >= buffer.len() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    println!("HTTP: Read error: {:?}", e);
+                    break;
+                }
+            }
         }
 
-        // Get current time from RTC (set by NTP sync task)
-        let rtc_us = rtc.current_time_us();
-        let total_secs = (rtc_us / 1_000_000) as i64 + TIMEZONE_OFFSET_SECS;
+        // Parse request
+        let request = core::str::from_utf8(&buffer[..pos]).unwrap_or("");
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
 
-        // Convert Unix timestamp to date/time components
-        // Days since Unix epoch (1970-01-01)
-        let days = total_secs / 86400;
-        let time_of_day = ((total_secs % 86400) + 86400) % 86400; // Handle negative
+        println!("HTTP: Request for {}", path);
 
-        let hours = (time_of_day / 3600) as u32;
-        let minutes = ((time_of_day % 3600) / 60) as u32;
-        let seconds = (time_of_day % 60) as u32;
+        // Send response
+        let response = match path {
+            "/" => {
+                let header = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n";
+                let _ = socket.write_all(header.as_bytes()).await;
+                let _ = socket.write_all(INDEX_HTML.as_bytes()).await;
+                "index"
+            }
+            "/config" => {
+                let body = "{\"timezone\":\"-5\",\"color\":\"#00ff00\",\"hour_format\":\"12\"}";
+                let header = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n";
+                let _ = socket.write_all(header.as_bytes()).await;
+                let _ = socket.write_all(body.as_bytes()).await;
+                "config"
+            }
+            _ => {
+                let header = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot Found";
+                let _ = socket.write_all(header.as_bytes()).await;
+                "404"
+            }
+        };
 
-        // Simple date calculation (good enough for display)
-        let (year, month, day) = days_to_ymd(days as i32);
+        println!("HTTP: Sent {} response", response);
 
-        // Create NaiveDateTime for display
-        let datetime = NaiveDateTime::new(
-            chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap_or_else(|| {
-                chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
-            }),
-            chrono::NaiveTime::from_hms_opt(hours, minutes, seconds).unwrap_or_else(|| {
-                chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()
-            }),
-        );
-
-        display.display(datetime);
-
-        // Log every 5 seconds to reduce serial spam
-        if seconds.is_multiple_of(5) && seconds != last_log_second {
-            println!("Time: {:02}:{:02}:{:02}", hours, minutes, seconds);
-            last_log_second = seconds;
-        }
+        let _ = socket.flush().await;
+        Timer::after(Duration::from_millis(1000)).await;
+        socket.close();
+        Timer::after(Duration::from_millis(1000)).await;
+        socket.abort();
     }
 }
 
 /// Convert days since Unix epoch to year/month/day
-/// This is a simplified algorithm that works for dates from 1970 onwards
 fn days_to_ymd(days: i32) -> (i32, u32, u32) {
-    // Algorithm based on Howard Hinnant's date algorithms
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u32;

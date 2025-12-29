@@ -20,6 +20,7 @@ esp-radio = { version = "0.17.0", features = ["esp32", "wifi"] }
 
 # Embassy
 embassy-executor = "0.9.0"
+embassy-futures = "0.1"
 embassy-net = { version = "0.7.0", features = [
   "dhcpv4",
   "dns",
@@ -29,6 +30,11 @@ embassy-net = { version = "0.7.0", features = [
 ] }
 embassy-time = "0.5.0"
 embassy-sync = "0.6"
+
+# DHCP server for AP mode
+edge-dhcp = "0.5.0"
+edge-nal = "0.5.0"
+edge-nal-embassy = "0.6.0"
 
 # Embedded
 embedded-hal = "1.0.0"
@@ -44,10 +50,11 @@ drivers = { path = "../drivers", default-features = false }
 
 # Time
 chrono = { version = "0.4", default-features = false }
-sntpc = { version = "0.7", default-features = false, features = ["embassy-socket"] }
+sntpc = { version = "0.7.0", default-features = false, features = ["embassy-socket-ipv6"] }
 
 # Serialization
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde-json-core = "0.6"
 
 [profile.dev]
 opt-level = "s"

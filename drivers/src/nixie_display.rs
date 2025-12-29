@@ -2,6 +2,7 @@ use crate::shift_register::Shift;
 use chrono::{Datelike, Timelike};
 use hal::digital::OutputPin;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisplayMode {
     Time,
     Date,
