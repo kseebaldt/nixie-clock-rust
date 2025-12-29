@@ -1,12 +1,17 @@
 #![no_std]
 #![no_main]
 
+use core::net::{IpAddr, SocketAddr};
+
 use embassy_executor::Spawner;
+use embassy_net::{
+    Runner, Stack, StackResources,
+    dns::DnsQueryType,
+    udp::{PacketMetadata, UdpSocket},
+};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Ticker};
-#[cfg(feature = "wifi")]
-use embassy_time::Timer;
+use embassy_time::{Duration, Ticker, Timer};
 use embedded_hal::digital::InputPin;
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -18,20 +23,17 @@ use esp_hal::{
         channel::{self, ChannelIFace},
         timer::{self, TimerIFace},
     },
+    rng::Rng,
+    rtc_cntl::Rtc,
     time::Rate,
     timer::timg::TimerGroup,
 };
 use esp_println::println;
-use static_cell::StaticCell;
-
-#[cfg(feature = "wifi")]
-use embassy_net::{Runner, StackResources};
-#[cfg(feature = "wifi")]
-use esp_hal::rng::Rng;
-#[cfg(feature = "wifi")]
 use esp_radio::wifi::{
     ClientConfig, ModeConfig, ScanConfig, WifiController, WifiDevice, WifiEvent, WifiStaState,
 };
+use sntpc::{NtpContext, NtpTimestampGenerator, get_time};
+use static_cell::StaticCell;
 
 use chrono::NaiveDateTime;
 use drivers::debouncer::Debouncer;
@@ -44,10 +46,8 @@ extern crate alloc;
 esp_bootloader_esp_idf::esp_app_desc!();
 
 // WiFi credentials - set via environment variables at build time
-// Build with: WIFI_SSID="YourNetwork" WIFI_PASSWORD="YourPassword" cargo build --release --features wifi
-#[cfg(feature = "wifi")]
+// Build with: WIFI_SSID="YourNetwork" WIFI_PASSWORD="YourPassword" cargo build --release
 const WIFI_SSID: &str = env!("WIFI_SSID");
-#[cfg(feature = "wifi")]
 const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
 
 // Type aliases for cleaner code
@@ -57,8 +57,14 @@ type DebouncerMutex = Mutex<CriticalSectionRawMutex, ButtonDebouncer>;
 // Static storage for shared state
 static DEBOUNCER: StaticCell<DebouncerMutex> = StaticCell::new();
 
+// NTP server to use for time sync
+const NTP_SERVER: &str = "pool.ntp.org";
+
+// Timezone offset in seconds (e.g., -5 hours for EST = -18000)
+// TODO: Make this configurable
+const TIMEZONE_OFFSET_SECS: i64 = -5 * 3600; // EST
+
 // When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
-#[cfg(feature = "wifi")]
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: StaticCell<$t> = StaticCell::new();
@@ -80,14 +86,123 @@ async fn debounce_task(debouncer: &'static DebouncerMutex) {
 }
 
 /// Task to run the embassy-net network stack
-#[cfg(feature = "wifi")]
 #[embassy_executor::task]
 async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
 }
 
+/// Timestamp generator for sntpc using the ESP32 RTC
+#[derive(Clone, Copy)]
+struct RtcTimestamp {
+    current_time_us: u64,
+}
+
+impl NtpTimestampGenerator for RtcTimestamp {
+    fn init(&mut self) {
+        // We'll set this before each NTP request
+    }
+
+    fn timestamp_sec(&self) -> u64 {
+        self.current_time_us / 1_000_000
+    }
+
+    fn timestamp_subsec_micros(&self) -> u32 {
+        (self.current_time_us % 1_000_000) as u32
+    }
+}
+
+/// Task to periodically sync time via NTP
+#[embassy_executor::task]
+async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
+    // Wait for network to be ready
+    loop {
+        if stack.is_link_up() && stack.config_v4().is_some() {
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
+    println!("NTP: Starting time sync task");
+
+    // UDP socket buffers
+    let mut rx_meta = [PacketMetadata::EMPTY; 4];
+    let mut rx_buffer = [0; 512];
+    let mut tx_meta = [PacketMetadata::EMPTY; 4];
+    let mut tx_buffer = [0; 512];
+
+    loop {
+        // Resolve NTP server address
+        println!("NTP: Resolving {}...", NTP_SERVER);
+        let ntp_addrs = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
+            Ok(addrs) if !addrs.is_empty() => addrs,
+            Ok(_) => {
+                println!("NTP: DNS returned empty result");
+                Timer::after(Duration::from_secs(30)).await;
+                continue;
+            }
+            Err(e) => {
+                println!("NTP: DNS error: {:?}", e);
+                Timer::after(Duration::from_secs(30)).await;
+                continue;
+            }
+        };
+
+        let addr: IpAddr = ntp_addrs[0].into();
+        println!("NTP: Resolved to {}", addr);
+
+        // Create UDP socket
+        let mut socket = UdpSocket::new(
+            stack,
+            &mut rx_meta,
+            &mut rx_buffer,
+            &mut tx_meta,
+            &mut tx_buffer,
+        );
+
+        if let Err(e) = socket.bind(0) {
+            println!("NTP: Failed to bind socket: {:?}", e);
+            Timer::after(Duration::from_secs(30)).await;
+            continue;
+        }
+
+        // Perform NTP request
+        let context = NtpContext::new(RtcTimestamp {
+            current_time_us: rtc.current_time_us(),
+        });
+
+        match get_time(SocketAddr::from((addr, 123)), &socket, context).await {
+            Ok(time) => {
+                // Convert NTP time to microseconds and set RTC
+                const USEC_IN_SEC: u64 = 1_000_000;
+                let time_us = (time.sec() as u64 * USEC_IN_SEC)
+                    + ((time.sec_fraction() as u64 * USEC_IN_SEC) >> 32);
+                rtc.set_current_time_us(time_us);
+
+                // Calculate local time for display
+                let local_secs = time.sec() as i64 + TIMEZONE_OFFSET_SECS;
+                let hours = ((local_secs / 3600) % 24 + 24) % 24;
+                let minutes = (local_secs / 60) % 60;
+                let secs = local_secs % 60;
+
+                println!(
+                    "NTP: Time synced! UTC: {} Local: {:02}:{:02}:{:02}",
+                    time.sec(),
+                    hours,
+                    minutes,
+                    secs
+                );
+            }
+            Err(e) => {
+                println!("NTP: Error getting time: {:?}", e);
+            }
+        }
+
+        // Sync every 10 minutes
+        Timer::after(Duration::from_secs(600)).await;
+    }
+}
+
 /// Task to manage WiFi connection and reconnection
-#[cfg(feature = "wifi")]
 #[embassy_executor::task]
 async fn connection(mut controller: WifiController<'static>) {
     println!("start connection task");
@@ -143,13 +258,18 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
 
+    // Initialize RTC for timekeeping (used with NTP)
+    let rtc = {
+        static RTC: StaticCell<Rtc<'static>> = StaticCell::new();
+        &*RTC.init(Rtc::new(peripherals.LPWR))
+    };
+
     println!("Embassy initialized!");
 
     // =========================================================================
-    // WiFi Setup (only when wifi feature is enabled)
+    // WiFi Setup
     // =========================================================================
 
-    #[cfg(feature = "wifi")]
     let stack = {
         println!("Initializing WiFi...");
         let esp_radio_ctrl =
@@ -180,9 +300,6 @@ async fn main(spawner: Spawner) -> ! {
         println!("Network tasks spawned");
         stack
     };
-
-    #[cfg(not(feature = "wifi"))]
-    println!("WiFi disabled (enable with --features wifi)");
 
     // =========================================================================
     // GPIO Setup
@@ -279,63 +396,57 @@ async fn main(spawner: Spawner) -> ! {
     println!("Debouncer task spawned");
 
     // =========================================================================
-    // Wait for WiFi connection and get IP (only when wifi feature is enabled)
+    // Wait for WiFi connection and get IP
     // =========================================================================
 
-    #[cfg(feature = "wifi")]
-    {
-        loop {
-            if stack.is_link_up() {
-                break;
-            }
-            Timer::after(Duration::from_millis(500)).await;
+    loop {
+        if stack.is_link_up() {
+            break;
         }
-
-        println!("Waiting to get IP address...");
-        loop {
-            if let Some(config) = stack.config_v4() {
-                println!("Got IP: {}", config.address);
-                // Change LED to green to indicate connected
-                rgb.set_color(0x008800).expect("Failed to set RGB color");
-                break;
-            }
-            Timer::after(Duration::from_millis(500)).await;
-        }
-
-        println!("WiFi connected with IP, starting main loop");
+        Timer::after(Duration::from_millis(500)).await;
     }
+
+    println!("Waiting to get IP address...");
+    loop {
+        if let Some(config) = stack.config_v4() {
+            println!("Got IP: {}", config.address);
+            // Change LED to green to indicate connected
+            rgb.set_color(0x008800).expect("Failed to set RGB color");
+            break;
+        }
+        Timer::after(Duration::from_millis(500)).await;
+    }
+
+    println!("WiFi connected with IP, starting NTP sync");
+
+    // Spawn NTP sync task
+    spawner.spawn(ntp_sync_task(stack, rtc)).ok();
 
     // =========================================================================
     // Main display loop
     // =========================================================================
 
-    // For now, use a fake time until NTP is implemented
-    // This will increment every second to simulate time passing
-    let mut fake_seconds: u32 = 12 * 3600 + 34 * 60; // Start at 12:34:00
-
     let mut button_hold_counter: u8 = 0;
     let mut ticker = Ticker::every(Duration::from_millis(200));
-
-    #[cfg(feature = "wifi")]
+    let mut last_log_second: u32 = 0;
     let mut last_wifi_status = true; // We started connected
+
+    println!("Starting main loop");
 
     loop {
         ticker.next().await;
 
-        // Update WiFi status LED (only when wifi feature is enabled)
-        #[cfg(feature = "wifi")]
-        {
-            let current_wifi_status = stack.is_link_up();
-            if current_wifi_status != last_wifi_status {
-                if current_wifi_status {
-                    rgb.set_color(0x008800).ok(); // Green = connected
-                    println!("WiFi reconnected");
-                } else {
-                    rgb.set_color(0x880000).ok(); // Red = disconnected
-                    println!("WiFi disconnected");
-                }
-                last_wifi_status = current_wifi_status;
+        // Update WiFi status LED
+        let current_wifi_status = stack.is_link_up();
+        if current_wifi_status != last_wifi_status {
+            if current_wifi_status {
+                rgb.set_color(0x008800).ok(); // Green = connected
+                println!("WiFi reconnected");
+            } else {
+                rgb.set_color(0x880000).ok(); // Red = disconnected
+                println!("WiFi disconnected");
             }
+            last_wifi_status = current_wifi_status;
         }
 
         // Check button state for mode switching
@@ -356,25 +467,55 @@ async fn main(spawner: Spawner) -> ! {
             println!("Display mode changed");
         }
 
-        // Create a NaiveDateTime for display
-        // Using a fixed date since we don't have NTP yet
-        let hours = (fake_seconds / 3600) % 24;
-        let minutes = (fake_seconds / 60) % 60;
-        let seconds = fake_seconds % 60;
+        // Get current time from RTC (set by NTP sync task)
+        let rtc_us = rtc.current_time_us();
+        let total_secs = (rtc_us / 1_000_000) as i64 + TIMEZONE_OFFSET_SECS;
 
+        // Convert Unix timestamp to date/time components
+        // Days since Unix epoch (1970-01-01)
+        let days = total_secs / 86400;
+        let time_of_day = ((total_secs % 86400) + 86400) % 86400; // Handle negative
+
+        let hours = (time_of_day / 3600) as u32;
+        let minutes = ((time_of_day % 3600) / 60) as u32;
+        let seconds = (time_of_day % 60) as u32;
+
+        // Simple date calculation (good enough for display)
+        let (year, month, day) = days_to_ymd(days as i32);
+
+        // Create NaiveDateTime for display
         let datetime = NaiveDateTime::new(
-            chrono::NaiveDate::from_ymd_opt(2024, 12, 27).unwrap(),
-            chrono::NaiveTime::from_hms_opt(hours, minutes, seconds).unwrap(),
+            chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap_or_else(|| {
+                chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()
+            }),
+            chrono::NaiveTime::from_hms_opt(hours, minutes, seconds).unwrap_or_else(|| {
+                chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+            }),
         );
 
         display.display(datetime);
 
-        // Increment fake time (1 second per 5 ticks at 200ms = 1 second)
-        fake_seconds += 1;
-
-        // Only log every 5 seconds to reduce serial spam
-        if seconds.is_multiple_of(5) && fake_seconds.is_multiple_of(5) {
+        // Log every 5 seconds to reduce serial spam
+        if seconds.is_multiple_of(5) && seconds != last_log_second {
             println!("Time: {:02}:{:02}:{:02}", hours, minutes, seconds);
+            last_log_second = seconds;
         }
     }
+}
+
+/// Convert days since Unix epoch to year/month/day
+/// This is a simplified algorithm that works for dates from 1970 onwards
+fn days_to_ymd(days: i32) -> (i32, u32, u32) {
+    // Algorithm based on Howard Hinnant's date algorithms
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i32 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }

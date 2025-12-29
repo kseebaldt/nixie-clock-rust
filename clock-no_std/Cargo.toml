@@ -8,10 +8,6 @@ version      = "0.1.0"
 name = "clock-no_std"
 path = "./src/bin/main.rs"
 
-[features]
-default = []
-wifi = ["esp-rtos/esp-radio", "dep:esp-radio", "dep:embassy-net"]
-
 [dependencies]
 # ESP-HAL ecosystem (crates.io versions)
 esp-hal = { version = "1.0.0", features = ["esp32", "unstable"] }
@@ -19,17 +15,18 @@ esp-alloc = { version = "0.9.0" }
 esp-backtrace = { version = "0.18.1", features = ["esp32", "panic-handler", "println"] }
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32"] }
 esp-println = { version = "0.16.1", features = ["esp32", "log-04"] }
-esp-rtos = { version = "0.2.0", features = ["esp32", "embassy"] }
-esp-radio = { version = "0.17.0", features = ["esp32", "wifi"], optional = true }
+esp-rtos = { version = "0.2.0", features = ["esp32", "embassy", "esp-radio"] }
+esp-radio = { version = "0.17.0", features = ["esp32", "wifi"] }
 
 # Embassy
 embassy-executor = "0.9.0"
 embassy-net = { version = "0.7.0", features = [
   "dhcpv4",
+  "dns",
   "medium-ethernet",
   "tcp",
   "udp",
-], optional = true }
+] }
 embassy-time = "0.5.0"
 embassy-sync = "0.6"
 
@@ -47,6 +44,7 @@ drivers = { path = "../drivers", default-features = false }
 
 # Time
 chrono = { version = "0.4", default-features = false }
+sntpc = { version = "0.7", default-features = false, features = ["embassy-socket"] }
 
 # Serialization
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
