@@ -12,7 +12,7 @@ use embassy_net::{
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_sync::signal::Signal;
+
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_hal::digital::InputPin;
 use esp_alloc as _;
@@ -68,9 +68,9 @@ static CONFIG: StaticCell<ConfigMutex> = StaticCell::new();
 type SeqConfigStorageMutex = Mutex<CriticalSectionRawMutex, SeqConfigStorage<'static>>;
 static CONFIG_STORAGE: StaticCell<SeqConfigStorageMutex> = StaticCell::new();
 
-// Signal that config has changed - tasks watch this and react accordingly
-type ConfigChangedSignal = Signal<CriticalSectionRawMutex, ()>;
-static CONFIG_CHANGED: StaticCell<ConfigChangedSignal> = StaticCell::new();
+// Watch for config changes - sends the actual config to all watchers
+type ConfigWatch = embassy_sync::watch::Watch<CriticalSectionRawMutex, InternalConfig, 3>;
+static CONFIG_WATCH: StaticCell<ConfigWatch> = StaticCell::new();
 
 // NTP server to use for time sync
 const NTP_SERVER: &str = "pool.ntp.org";
@@ -269,24 +269,18 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
 }
 
 /// Task to manage WiFi connection and reconnection (AP+STA mode)
-/// Watches config_changed signal and reconnects if WiFi credentials changed
+/// Watches config and reconnects if WiFi credentials changed
 #[embassy_executor::task]
 async fn connection(
     mut controller: WifiController<'static>,
-    config: &'static ConfigMutex,
-    config_changed: &'static ConfigChangedSignal,
+    mut config_receiver: embassy_sync::watch::DynReceiver<'static, InternalConfig>,
 ) {
     println!("start connection task");
     println!("Device capabilities: {:?}", controller.capabilities());
 
     // Track current WiFi credentials to detect changes
-    let (mut current_ssid, mut current_pass) = {
-        let cfg = config.lock().await;
-        (
-            alloc::string::String::from(cfg.wifi_ssid()),
-            alloc::string::String::from(cfg.wifi_pass()),
-        )
-    };
+    let mut current_ssid = alloc::string::String::new();
+    let mut current_pass = alloc::string::String::new();
 
     println!("Starting wifi (AP+STA mode)");
     controller.start_async().await.unwrap();
@@ -299,26 +293,21 @@ async fn connection(
                 match controller.connect_async().await {
                     Ok(_) => {
                         println!("STA connected!");
-                        // Wait for either disconnection OR config change signal
+                        // Wait for either disconnection OR config change
                         use embassy_futures::select::{Either, select};
                         match select(
                             controller.wait_for_event(WifiEvent::StaDisconnected),
-                            config_changed.wait(),
+                            config_receiver.changed(),
                         )
                         .await
                         {
                             Either::First(_) => {
                                 println!("STA disconnected");
                             }
-                            Either::Second(_) => {
-                                // Config changed - check if WiFi credentials changed
-                                let (new_ssid, new_pass) = {
-                                    let cfg = config.lock().await;
-                                    (
-                                        alloc::string::String::from(cfg.wifi_ssid()),
-                                        alloc::string::String::from(cfg.wifi_pass()),
-                                    )
-                                };
+                            Either::Second(new_config) => {
+                                // Check if WiFi credentials changed
+                                let new_ssid = alloc::string::String::from(new_config.wifi_ssid());
+                                let new_pass = alloc::string::String::from(new_config.wifi_pass());
 
                                 if new_ssid != current_ssid || new_pass != current_pass {
                                     println!("WiFi credentials changed, reconfiguring...");
@@ -344,36 +333,38 @@ async fn connection(
                     }
                     Err(e) => {
                         println!("Failed to connect to wifi: {e:?}");
-                        // Check if there's a pending config change (credentials changed while disconnected)
-                        if config_changed.signaled() {
-                            config_changed.wait().await; // Clear the signal
-                            let (new_ssid, new_pass) = {
-                                let cfg = config.lock().await;
-                                (
-                                    alloc::string::String::from(cfg.wifi_ssid()),
-                                    alloc::string::String::from(cfg.wifi_pass()),
-                                )
-                            };
-
-                            if new_ssid != current_ssid || new_pass != current_pass {
-                                println!("WiFi credentials changed, reconfiguring...");
-                                current_ssid = new_ssid.clone();
-                                current_pass = new_pass.clone();
-
-                                let client_config = ModeConfig::ApSta(
-                                    ClientConfig::default()
-                                        .with_ssid(new_ssid)
-                                        .with_password(new_pass),
-                                    AccessPointConfig::default().with_ssid("nixie-clock".into()),
-                                );
-                                controller.set_config(&client_config).unwrap();
-                            }
-                        }
                         Timer::after(Duration::from_millis(5000)).await
                     }
                 }
             }
             _ => return,
+        }
+    }
+}
+
+/// Task to update RGB LED color when received via channel
+/// This allows the HTTP handler to send color updates without owning the RGB hardware
+#[embassy_executor::task]
+async fn rgb_led_task(
+    mut rgb: RgbLed<esp_hal::ledc::channel::Channel<'static, esp_hal::ledc::LowSpeed>>,
+    mut config_receiver: embassy_sync::watch::DynReceiver<'static, InternalConfig>,
+) {
+    // Track current color to avoid unnecessary updates
+    let mut current_color = 0u32;
+
+    loop {
+        // Wait for config change and get the new config
+        let new_config = config_receiver.changed().await;
+        let new_color = new_config.led_color();
+
+        // Only update if color actually changed
+        if new_color != current_color {
+            current_color = new_color;
+            if let Err(e) = rgb.set_color(new_color) {
+                println!("RGB: Failed to set color: {:?}", e);
+            } else {
+                println!("RGB: Color updated to #{:06x}", new_color);
+            }
         }
     }
 }
@@ -556,8 +547,9 @@ async fn main(spawner: Spawner) -> ! {
     // Store config in static for sharing between tasks
     let config = CONFIG.init(Mutex::new(app_config.clone()));
 
-    // Initialize config changed signal - watched by WiFi task and others
-    let config_changed = CONFIG_CHANGED.init(Signal::new());
+    // Initialize config watch with current config - multiple tasks can subscribe
+    let config_watch = CONFIG_WATCH.init(embassy_sync::watch::Watch::new());
+    config_watch.sender().send(app_config.clone());
 
     // =========================================================================
     // WiFi Setup (AP + STA mode for both internet access and local server)
@@ -615,7 +607,7 @@ async fn main(spawner: Spawner) -> ! {
 
         // Spawn network tasks
         spawner
-            .spawn(connection(controller, config, config_changed))
+            .spawn(connection(controller, config_watch.dyn_receiver().unwrap()))
             .ok();
         spawner.spawn(net_task(ap_runner)).ok();
         spawner.spawn(net_task(sta_runner)).ok();
@@ -653,7 +645,10 @@ async fn main(spawner: Spawner) -> ! {
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
-    let mut lstimer0 = ledc.timer::<LowSpeed>(timer::Number::Timer0);
+    let lstimer0 = mk_static!(
+        esp_hal::ledc::timer::Timer<'static, LowSpeed>,
+        ledc.timer::<LowSpeed>(timer::Number::Timer0)
+    );
     lstimer0
         .configure(timer::config::Config {
             duty: timer::config::Duty::Duty8Bit,
@@ -665,7 +660,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut red_channel = ledc.channel(channel::Number::Channel0, peripherals.GPIO27);
     red_channel
         .configure(channel::config::Config {
-            timer: &lstimer0,
+            timer: lstimer0,
             duty_pct: 100,
             drive_mode: DriveMode::PushPull,
         })
@@ -674,7 +669,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut green_channel = ledc.channel(channel::Number::Channel1, peripherals.GPIO26);
     green_channel
         .configure(channel::config::Config {
-            timer: &lstimer0,
+            timer: lstimer0,
             duty_pct: 100,
             drive_mode: DriveMode::PushPull,
         })
@@ -683,7 +678,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut blue_channel = ledc.channel(channel::Number::Channel2, peripherals.GPIO25);
     blue_channel
         .configure(channel::config::Config {
-            timer: &lstimer0,
+            timer: lstimer0,
             duty_pct: 100,
             drive_mode: DriveMode::PushPull,
         })
@@ -697,6 +692,12 @@ async fn main(spawner: Spawner) -> ! {
         "RGB LED initialized with color: #{:06x}",
         app_config.led_color()
     );
+
+    // Spawn RGB LED task with config watch receiver
+    spawner
+        .spawn(rgb_led_task(rgb, config_watch.dyn_receiver().unwrap()))
+        .ok();
+    println!("RGB LED task spawned");
 
     // =========================================================================
     // Initialize shared state
@@ -762,9 +763,10 @@ async fn main(spawner: Spawner) -> ! {
 
     println!("STA connected, waiting for DHCP...");
     loop {
-        if let Some(config) = sta_stack.config_v4() {
-            println!("STA got IP: {}", config.address);
-            rgb.set_color(0x008800).expect("Failed to set RGB color");
+        if let Some(cfg) = sta_stack.config_v4() {
+            println!("STA got IP: {}", cfg.address);
+            // Send current config to trigger RGB task to set the configured color
+            config_watch.sender().send(app_config.clone());
             break;
         }
         Timer::after(Duration::from_millis(500)).await;
@@ -1022,18 +1024,8 @@ async fn main(spawner: Spawner) -> ! {
                             *cfg_guard = internal_config.clone();
                             drop(cfg_guard);
 
-                            // Signal that config changed - tasks will check what they care about
-                            config_changed.signal(());
-
-                            // Apply LED color immediately
-                            if let Err(e) = rgb.set_color(internal_config.led_color()) {
-                                println!("HTTP: Failed to set LED color: {:?}", e);
-                            } else {
-                                println!(
-                                    "HTTP: LED color updated to #{:06x}",
-                                    internal_config.led_color()
-                                );
-                            }
+                            // Send new config to all watchers
+                            config_watch.sender().send(internal_config.clone());
 
                             println!("HTTP: Config updated: {:?}", internal_config);
 
