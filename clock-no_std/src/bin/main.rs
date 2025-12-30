@@ -12,6 +12,7 @@ use embassy_net::{
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Ticker, Timer};
 use embedded_hal::digital::InputPin;
 use esp_alloc as _;
@@ -52,11 +53,6 @@ extern crate alloc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-// WiFi credentials - set via environment variables at build time
-// Build with: WIFI_SSID="YourNetwork" WIFI_PASSWORD="YourPassword" cargo build --release
-const WIFI_SSID: &str = env!("WIFI_SSID");
-const WIFI_PASSWORD: &str = env!("WIFI_PASSWORD");
-
 // Type aliases for cleaner code
 type ButtonDebouncer = Debouncer<Input<'static>>;
 type DebouncerMutex = Mutex<CriticalSectionRawMutex, ButtonDebouncer>;
@@ -71,6 +67,10 @@ static CONFIG: StaticCell<ConfigMutex> = StaticCell::new();
 // Type alias for config storage mutex
 type SeqConfigStorageMutex = Mutex<CriticalSectionRawMutex, SeqConfigStorage<'static>>;
 static CONFIG_STORAGE: StaticCell<SeqConfigStorageMutex> = StaticCell::new();
+
+// Signal to trigger WiFi reconnection when credentials change
+type WifiReconnectSignal = Signal<CriticalSectionRawMutex, ()>;
+static WIFI_RECONNECT: StaticCell<WifiReconnectSignal> = StaticCell::new();
 
 // NTP server to use for time sync
 const NTP_SERVER: &str = "pool.ntp.org";
@@ -270,7 +270,11 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
 
 /// Task to manage WiFi connection and reconnection (AP+STA mode)
 #[embassy_executor::task]
-async fn connection(mut controller: WifiController<'static>) {
+async fn connection(
+    mut controller: WifiController<'static>,
+    config: &'static ConfigMutex,
+    wifi_reconnect: &'static WifiReconnectSignal,
+) {
     println!("start connection task");
     println!("Device capabilities: {:?}", controller.capabilities());
 
@@ -285,12 +289,58 @@ async fn connection(mut controller: WifiController<'static>) {
                 match controller.connect_async().await {
                     Ok(_) => {
                         println!("STA connected!");
-                        // Wait for disconnection
-                        controller.wait_for_event(WifiEvent::StaDisconnected).await;
-                        println!("STA disconnected");
+                        // Wait for either disconnection OR reconnect signal
+                        use embassy_futures::select::{Either, select};
+                        match select(
+                            controller.wait_for_event(WifiEvent::StaDisconnected),
+                            wifi_reconnect.wait(),
+                        )
+                        .await
+                        {
+                            Either::First(_) => {
+                                println!("STA disconnected");
+                            }
+                            Either::Second(_) => {
+                                println!("WiFi reconnect signal received, reconfiguring...");
+                                // Disconnect first
+                                let _ = controller.disconnect_async().await;
+
+                                // Get new credentials from config
+                                let (ssid, password) = {
+                                    let cfg = config.lock().await;
+                                    (cfg.wifi_ssid().into(), cfg.wifi_pass().into())
+                                };
+
+                                // Reconfigure with new credentials
+                                let client_config = ModeConfig::ApSta(
+                                    ClientConfig::default()
+                                        .with_ssid(ssid)
+                                        .with_password(password),
+                                    AccessPointConfig::default().with_ssid("nixie-clock".into()),
+                                );
+                                controller.set_config(&client_config).unwrap();
+                                println!("WiFi reconfigured with new credentials");
+                            }
+                        }
                     }
                     Err(e) => {
                         println!("Failed to connect to wifi: {e:?}");
+                        // Check if there's a pending reconnect signal (credentials changed while disconnected)
+                        if wifi_reconnect.signaled() {
+                            wifi_reconnect.wait().await; // Clear the signal
+                            println!("WiFi credentials changed, reconfiguring...");
+                            let (ssid, password) = {
+                                let cfg = config.lock().await;
+                                (cfg.wifi_ssid().into(), cfg.wifi_pass().into())
+                            };
+                            let client_config = ModeConfig::ApSta(
+                                ClientConfig::default()
+                                    .with_ssid(ssid)
+                                    .with_password(password),
+                                AccessPointConfig::default().with_ssid("nixie-clock".into()),
+                            );
+                            controller.set_config(&client_config).unwrap();
+                        }
                         Timer::after(Duration::from_millis(5000)).await
                     }
                 }
@@ -478,6 +528,9 @@ async fn main(spawner: Spawner) -> ! {
     // Store config in static for sharing between tasks
     let config = CONFIG.init(Mutex::new(app_config.clone()));
 
+    // Initialize WiFi reconnect signal
+    let wifi_reconnect = WIFI_RECONNECT.init(Signal::new());
+
     // =========================================================================
     // WiFi Setup (AP + STA mode for both internet access and local server)
     // =========================================================================
@@ -521,17 +574,21 @@ async fn main(spawner: Spawner) -> ! {
             seed,
         );
 
-        // Configure AP+STA mode
+        // Configure AP+STA mode using credentials from config
+        println!("WiFi STA credentials: SSID='{}'", app_config.wifi_ssid());
+
         let client_config = ModeConfig::ApSta(
             ClientConfig::default()
-                .with_ssid(WIFI_SSID.into())
-                .with_password(WIFI_PASSWORD.into()),
+                .with_ssid(app_config.wifi_ssid().into())
+                .with_password(app_config.wifi_pass().into()),
             AccessPointConfig::default().with_ssid("nixie-clock".into()),
         );
         controller.set_config(&client_config).unwrap();
 
         // Spawn network tasks
-        spawner.spawn(connection(controller)).ok();
+        spawner
+            .spawn(connection(controller, config, wifi_reconnect))
+            .ok();
         spawner.spawn(net_task(ap_runner)).ok();
         spawner.spawn(net_task(sta_runner)).ok();
 
@@ -929,10 +986,23 @@ async fn main(spawner: Spawner) -> ! {
                             }
                             drop(storage_guard);
 
+                            // Check if WiFi credentials changed
+                            let wifi_changed = {
+                                let cfg_guard = config.lock().await;
+                                cfg_guard.wifi_ssid() != internal_config.wifi_ssid()
+                                    || cfg_guard.wifi_pass() != internal_config.wifi_pass()
+                            };
+
                             // Update the shared config mutex
                             let mut cfg_guard = config.lock().await;
                             *cfg_guard = internal_config.clone();
                             drop(cfg_guard);
+
+                            // Signal WiFi reconnect if credentials changed
+                            if wifi_changed {
+                                println!("HTTP: WiFi credentials changed, signaling reconnect");
+                                wifi_reconnect.signal(());
+                            }
 
                             // Apply LED color immediately
                             if let Err(e) = rgb.set_color(internal_config.led_color()) {
