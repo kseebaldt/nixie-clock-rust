@@ -337,7 +337,6 @@ async fn display_task(
 ) {
     let mut shift_register = ShiftRegister::new(&mut pins.data, &mut pins.clock, &mut pins.latch);
     let mut display = NixieDisplay::new(&mut shift_register, pins.sep1, pins.sep2);
-    display.set_hour_format(HourFormat::TwelveHour);
 
     let mut button_hold_counter: u8 = 0;
     let mut ticker = Ticker::every(Duration::from_millis(200));
@@ -371,13 +370,22 @@ async fn display_task(
             println!("Display mode changed to {:?}", *mode);
         }
 
-        // Get current display mode and timezone offset
-        let (mode, tz_offset) = {
+        // Get current display mode, timezone offset, and hour format from config
+        let (mode, tz_offset, hours_24) = {
             let mode_guard = display_mode.lock().await;
             let config_guard = config.lock().await;
-            (*mode_guard, timezone_to_offset(config_guard.tz()))
+            (
+                *mode_guard,
+                timezone_to_offset(config_guard.tz()),
+                config_guard.hours_24(),
+            )
         };
         display.set_mode(mode);
+        display.set_hour_format(if hours_24 {
+            HourFormat::TwentyFourHour
+        } else {
+            HourFormat::TwelveHour
+        });
 
         // Get current time from RTC (set by NTP sync task)
         let rtc_us = rtc.current_time_us();
@@ -925,6 +933,16 @@ async fn main(spawner: Spawner) -> ! {
                             let mut cfg_guard = config.lock().await;
                             *cfg_guard = internal_config.clone();
                             drop(cfg_guard);
+
+                            // Apply LED color immediately
+                            if let Err(e) = rgb.set_color(internal_config.led_color()) {
+                                println!("HTTP: Failed to set LED color: {:?}", e);
+                            } else {
+                                println!(
+                                    "HTTP: LED color updated to #{:06x}",
+                                    internal_config.led_color()
+                                );
+                            }
 
                             println!("HTTP: Config updated: {:?}", internal_config);
 
