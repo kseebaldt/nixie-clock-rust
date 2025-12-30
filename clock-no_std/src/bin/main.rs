@@ -39,7 +39,8 @@ use esp_radio::wifi::{
 use sntpc::{NtpContext, NtpTimestampGenerator, get_time};
 use static_cell::StaticCell;
 
-use chrono::NaiveDateTime;
+use chrono::{DateTime, Timelike};
+use chrono_tz::Tz;
 use drivers::config::InternalConfig;
 use drivers::debouncer::Debouncer;
 use drivers::nixie_display::{DisplayMode, HourFormat, NixieDisplay};
@@ -75,8 +76,8 @@ static CONFIG_WATCH: StaticCell<ConfigWatch> = StaticCell::new();
 // NTP server to use for time sync
 const NTP_SERVER: &str = "pool.ntp.org";
 
-// Default timezone offset in seconds (e.g., -5 hours for EST = -18000)
-const DEFAULT_TIMEZONE_OFFSET_SECS: i64 = -5 * 3600; // EST
+// Default timezone when parsing fails
+const DEFAULT_TIMEZONE: Tz = chrono_tz::US::Eastern;
 
 // HTTP server port
 const HTTP_PORT: u16 = 8080;
@@ -241,18 +242,15 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
                     + ((time.sec_fraction() as u64 * USEC_IN_SEC) >> 32);
                 rtc.set_current_time_us(time_us);
 
-                // Calculate local time for display (using default offset for log)
-                let local_secs = time.sec() as i64 + DEFAULT_TIMEZONE_OFFSET_SECS;
-                let hours = ((local_secs / 3600) % 24 + 24) % 24;
-                let minutes = (local_secs / 60) % 60;
-                let secs = local_secs % 60;
+                // Log UTC time
+                let utc_secs = time.sec() as i64;
+                let hours = ((utc_secs / 3600) % 24 + 24) % 24;
+                let minutes = ((utc_secs / 60) % 60 + 60) % 60;
+                let secs = (utc_secs % 60 + 60) % 60;
 
                 println!(
-                    "NTP: Time synced! UTC: {} Local: {:02}:{:02}:{:02}",
-                    time.sec(),
-                    hours,
-                    minutes,
-                    secs
+                    "NTP: Time synced! UTC: {:02}:{:02}:{:02}",
+                    hours, minutes, secs
                 );
             }
             Err(e) => {
@@ -375,21 +373,9 @@ struct DisplayPins {
     sep2: Output<'static>,
 }
 
-/// Convert timezone string to offset in seconds
-/// This is a simplified implementation that maps common timezone names to offsets
-fn timezone_to_offset(tz: &str) -> i64 {
-    match tz {
-        "US/Eastern" | "America/New_York" => -5 * 3600,
-        "US/Central" | "America/Chicago" => -6 * 3600,
-        "US/Mountain" | "America/Denver" => -7 * 3600,
-        "US/Pacific" | "America/Los_Angeles" => -8 * 3600,
-        "Europe/London" => 0,
-        "Europe/Paris" | "Europe/Berlin" => 3600,
-        "Asia/Tokyo" => 9 * 3600,
-        "Australia/Sydney" => 10 * 3600,
-        "UTC" => 0,
-        _ => DEFAULT_TIMEZONE_OFFSET_SECS, // Default to EST
-    }
+/// Parse timezone string to chrono_tz::Tz, falling back to default
+fn parse_timezone(tz: &str) -> Tz {
+    tz.parse().unwrap_or(DEFAULT_TIMEZONE)
 }
 
 /// Display task - updates the nixie display based on current time
@@ -436,13 +422,13 @@ async fn display_task(
             println!("Display mode changed to {:?}", *mode);
         }
 
-        // Get current display mode, timezone offset, and hour format from config
-        let (mode, tz_offset, hours_24) = {
+        // Get current display mode, timezone, and hour format from config
+        let (mode, tz, hours_24) = {
             let mode_guard = display_mode.lock().await;
             let config_guard = config.lock().await;
             (
                 *mode_guard,
-                timezone_to_offset(config_guard.tz()),
+                parse_timezone(config_guard.tz()),
                 config_guard.hours_24(),
             )
         };
@@ -453,33 +439,31 @@ async fn display_task(
             HourFormat::TwelveHour
         });
 
-        // Get current time from RTC (set by NTP sync task)
+        // Get current time from RTC (set by NTP sync task) as Unix timestamp
         let rtc_us = rtc.current_time_us();
-        let total_secs = (rtc_us / 1_000_000) as i64 + tz_offset;
+        let unix_secs = (rtc_us / 1_000_000) as i64;
 
-        // Convert Unix timestamp to date/time components
-        let days = total_secs / 86400;
-        let time_of_day = ((total_secs % 86400) + 86400) % 86400;
+        // Convert UTC timestamp to local time using chrono-tz (handles DST automatically)
+        let local_time = match DateTime::from_timestamp(unix_secs, 0) {
+            Some(utc) => utc.with_timezone(&tz).naive_local(),
+            None => {
+                // Fallback if timestamp is invalid
+                chrono::NaiveDateTime::default()
+            }
+        };
 
-        let hours = (time_of_day / 3600) as u32;
-        let minutes = ((time_of_day % 3600) / 60) as u32;
-        let seconds = (time_of_day % 60) as u32;
-
-        let (year, month, day) = days_to_ymd(days as i32);
-
-        let datetime = NaiveDateTime::new(
-            chrono::NaiveDate::from_ymd_opt(year, month, day)
-                .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2024, 1, 1).unwrap()),
-            chrono::NaiveTime::from_hms_opt(hours, minutes, seconds)
-                .unwrap_or_else(|| chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()),
-        );
-
-        display.display(datetime);
+        display.display(local_time);
 
         // Log every 5 seconds
-        if seconds.is_multiple_of(5) && seconds != last_log_second {
-            println!("Time: {:02}:{:02}:{:02}", hours, minutes, seconds);
-            last_log_second = seconds;
+        let seconds = local_time.and_utc().timestamp() % 60;
+        if seconds % 5 == 0 && seconds as u32 != last_log_second {
+            println!(
+                "Time: {:02}:{:02}:{:02}",
+                local_time.time().hour(),
+                local_time.time().minute(),
+                local_time.time().second()
+            );
+            last_log_second = seconds as u32;
         }
     }
 }
@@ -874,19 +858,4 @@ async fn main(spawner: Spawner) -> ! {
         )
         .await;
     }
-}
-
-/// Convert days since Unix epoch to year/month/day
-fn days_to_ymd(days: i32) -> (i32, u32, u32) {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i32 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
 }

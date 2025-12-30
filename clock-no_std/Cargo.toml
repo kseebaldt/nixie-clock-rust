@@ -55,6 +55,7 @@ drivers = { path = "../drivers", default-features = false }
 
 # Time
 chrono = { version = "0.4", default-features = false }
+chrono-tz = { version = "0.10", default-features = false }
 sntpc = { version = "0.7.0", default-features = false, features = ["embassy-socket-ipv6"] }
 
 # Serialization
