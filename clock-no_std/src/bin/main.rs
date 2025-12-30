@@ -115,6 +115,26 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
     runner.run().await
 }
 
+/// HTTP server task (pool_size=2 for AP and STA)
+#[embassy_executor::task(pool_size = 2)]
+async fn http_server_task(
+    name: &'static str,
+    stack: Stack<'static>,
+    app: &'static picoserve::AppRouter<clock_no_std::http::AppProps>,
+    config: &'static picoserve::Config<Duration>,
+    state: &'static clock_no_std::http::AppState,
+) {
+    let mut rx = [0; 2048];
+    let mut tx = [0; 2048];
+    let mut http_buf = [0; 2048];
+
+    loop {
+        picoserve::Server::new(&app.shared().with_state(state), config, &mut http_buf)
+            .listen_and_serve(name, stack, HTTP_PORT, &mut rx, &mut tx)
+            .await;
+    }
+}
+
 /// DHCP server task for AP mode - allows clients to get an IP address
 #[embassy_executor::task]
 async fn dhcp_server_task(stack: Stack<'static>) {
@@ -200,25 +220,35 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
     let mut tx_meta = [PacketMetadata::EMPTY; 4];
     let mut tx_buffer = [0; 512];
 
+    // Cache the resolved NTP server IP to avoid repeated DNS lookups
+    let mut cached_addr: Option<IpAddr> = None;
+
     loop {
-        // Resolve NTP server address
-        println!("NTP: Resolving {}...", NTP_SERVER);
-        let ntp_addrs = match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
-            Ok(addrs) if !addrs.is_empty() => addrs,
-            Ok(_) => {
-                println!("NTP: DNS returned empty result");
-                Timer::after(Duration::from_secs(30)).await;
-                continue;
-            }
-            Err(e) => {
-                println!("NTP: DNS error: {:?}", e);
-                Timer::after(Duration::from_secs(30)).await;
-                continue;
+        // Use cached IP or resolve via DNS
+        let addr = match cached_addr {
+            Some(ip) => ip,
+            None => {
+                println!("NTP: Resolving {}...", NTP_SERVER);
+                match stack.dns_query(NTP_SERVER, DnsQueryType::A).await {
+                    Ok(addrs) if !addrs.is_empty() => {
+                        let ip: IpAddr = addrs[0].into();
+                        println!("NTP: Resolved to {}", ip);
+                        cached_addr = Some(ip);
+                        ip
+                    }
+                    Ok(_) => {
+                        println!("NTP: DNS returned empty result");
+                        Timer::after(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        println!("NTP: DNS error: {:?}", e);
+                        Timer::after(Duration::from_secs(30)).await;
+                        continue;
+                    }
+                }
             }
         };
-
-        let addr: IpAddr = ntp_addrs[0].into();
-        println!("NTP: Resolved to {}", addr);
 
         // Create UDP socket
         let mut socket = UdpSocket::new(
@@ -261,6 +291,8 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
             }
             Err(e) => {
                 println!("NTP: Error getting time: {:?}", e);
+                // Clear cache on NTP error - server might be unreachable
+                cached_addr = None;
             }
         }
 
@@ -294,7 +326,8 @@ async fn connection(
                 match controller.connect_async().await {
                     Ok(_) => {
                         println!("STA connected!");
-                        // Wait for either disconnection OR config change
+
+                        // Wait for disconnection or config change
                         use embassy_futures::select::{Either, select};
                         match select(
                             controller.wait_for_event(WifiEvent::StaDisconnected),
@@ -337,7 +370,17 @@ async fn connection(
                     }
                 }
             }
-            _ => return,
+            _ => {
+                // Controller stopped, try to restart it
+                println!("WiFi controller stopped, restarting...");
+                match controller.start_async().await {
+                    Ok(_) => println!("WiFi controller started"),
+                    Err(e) => {
+                        println!("Failed to start WiFi: {:?}", e);
+                        Timer::after(Duration::from_secs(5)).await;
+                    }
+                }
+            }
         }
     }
 }
@@ -768,18 +811,10 @@ async fn main(spawner: Spawner) -> ! {
     // =========================================================================
 
     // Print connection info
-    println!("HTTP: Starting web server on port {}", HTTP_PORT);
     println!(
         "HTTP: Connect to '{}' WiFi and browse to http://192.168.4.1:{}",
         AP_SSID, HTTP_PORT
     );
-    if let Some(cfg) = sta_stack.config_v4() {
-        println!(
-            "HTTP: Or use your home network and browse to http://{}:{}",
-            cfg.address.address(),
-            HTTP_PORT
-        );
-    }
 
     // Create picoserve app using AppWithStateBuilder pattern
     use clock_no_std::http::{AppProps, AppState, server_config};
@@ -797,32 +832,24 @@ async fn main(spawner: Spawner) -> ! {
         }
     );
 
-    // Run HTTP servers on both AP and STA interfaces concurrently
-    let mut ap_rx = [0; 2048];
-    let mut ap_tx = [0; 2048];
-    let mut sta_rx = [0; 2048];
-    let mut sta_tx = [0; 2048];
-    let mut ap_http = [0; 2048];
-    let mut sta_http = [0; 2048];
+    println!(
+        "HTTP: Listening on AP interface (192.168.4.1:{})...",
+        HTTP_PORT
+    );
 
-    println!("HTTP: Listening on AP and STA interfaces...");
+    // Only run HTTP on AP - running on both AP+STA causes WiFi to die
+    // (likely embassy-net/esp-radio resource exhaustion with dual listeners)
+    // STA is used for outbound connections (NTP, keepalive)
+    spawner
+        .spawn(http_server_task("AP", ap_stack, app, server_cfg, app_state))
+        .ok();
 
-    // Use select to run both servers - whichever gets a connection first handles it
+    // Main task - periodic WiFi keepalive
+    // Prevents WiFi from going idle (esp-radio may need periodic activity)
     loop {
-        embassy_futures::select::select(
-            picoserve::Server::new(
-                &app.shared().with_state(app_state),
-                server_cfg,
-                &mut ap_http,
-            )
-            .listen_and_serve("AP", ap_stack, HTTP_PORT, &mut ap_rx, &mut ap_tx),
-            picoserve::Server::new(
-                &app.shared().with_state(app_state),
-                server_cfg,
-                &mut sta_http,
-            )
-            .listen_and_serve("STA", sta_stack, HTTP_PORT, &mut sta_rx, &mut sta_tx),
-        )
-        .await;
+        Timer::after(Duration::from_secs(30)).await;
+
+        // Simple DNS query to keep WiFi active
+        let _ = sta_stack.dns_query("pool.ntp.org", DnsQueryType::A).await;
     }
 }
