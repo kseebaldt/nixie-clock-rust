@@ -45,7 +45,7 @@ use drivers::debouncer::Debouncer;
 use drivers::nixie_display::{DisplayMode, HourFormat, NixieDisplay};
 use drivers::rgb_led::RgbLed;
 use drivers::shift_register::ShiftRegister;
-use postcard::{from_bytes, to_vec};
+use postcard::from_bytes;
 
 use clock_no_std::storage::SeqConfigStorage;
 
@@ -963,8 +963,11 @@ async fn main(spawner: Spawner) -> ! {
                             let internal_config: InternalConfig = new_config.into();
 
                             // Serialize config using postcard
-                            let serialized: heapless::Vec<u8, 256> = match to_vec(&internal_config)
-                            {
+                            let mut serialized_buf = [0u8; 256];
+                            let serialized = match postcard::to_slice(
+                                &internal_config,
+                                &mut serialized_buf,
+                            ) {
                                 Ok(v) => v,
                                 Err(e) => {
                                     println!("HTTP: Failed to serialize config: {:?}", e);
@@ -976,7 +979,7 @@ async fn main(spawner: Spawner) -> ! {
 
                             // Save to flash storage
                             let mut storage_guard = config_storage.lock().await;
-                            match storage_guard.save(&serialized).await {
+                            match storage_guard.save(serialized).await {
                                 Ok(()) => {
                                     println!("HTTP: Config saved to flash");
                                 }
