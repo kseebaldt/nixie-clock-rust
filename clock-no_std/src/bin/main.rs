@@ -82,7 +82,7 @@ const DEFAULT_TIMEZONE: Tz = chrono_tz::US::Eastern;
 // HTTP server port
 const HTTP_PORT: u16 = 8080;
 
-// When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
+/// Helper macro to create static storage for values that need 'static lifetime
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: StaticCell<$t> = StaticCell::new();
@@ -717,13 +717,6 @@ async fn main(spawner: Spawner) -> ! {
     // Wait for AP to be ready (should be immediate with static IP)
     println!("Waiting for AP interface...");
     loop {
-        let ap_state = esp_radio::wifi::ap_state();
-        println!(
-            "AP state: {:?}, link_up: {}, config_up: {}",
-            ap_state,
-            ap_stack.is_link_up(),
-            ap_stack.is_config_up()
-        );
         if ap_stack.is_link_up() && ap_stack.is_config_up() {
             if let Some(config) = ap_stack.config_v4() {
                 println!("AP ready at: {}", config.address);
@@ -768,37 +761,6 @@ async fn main(spawner: Spawner) -> ! {
     // =========================================================================
     // HTTP Server (runs in main)
     // =========================================================================
-
-    // Test outbound TCP connection first (using STA stack)
-    println!("Testing outbound TCP connection via STA...");
-    {
-        use core::net::Ipv4Addr;
-        use embassy_net::tcp::TcpSocket;
-        use embedded_io_async::Write;
-
-        let mut rx_buffer = [0; 1024];
-        let mut tx_buffer = [0; 1024];
-        let mut socket = TcpSocket::new(sta_stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(Duration::from_secs(10)));
-
-        // Try to connect to a known server (Google)
-        let remote = (Ipv4Addr::new(142, 250, 185, 115), 80);
-        println!("Connecting to {:?}...", remote);
-        match socket.connect(remote).await {
-            Ok(_) => {
-                println!("Connected! TCP outbound works.");
-                let _ = socket
-                    .write_all(b"GET / HTTP/1.0\r\nHost: www.google.com\r\n\r\n")
-                    .await;
-                let mut buf = [0; 256];
-                if let Ok(n) = socket.read(&mut buf).await {
-                    println!("Got {} bytes response", n);
-                }
-            }
-            Err(e) => println!("Connect failed: {:?}", e),
-        }
-        socket.abort();
-    }
 
     // Print connection info
     println!("HTTP: Starting web server on port {}", HTTP_PORT);
