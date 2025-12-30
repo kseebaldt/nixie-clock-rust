@@ -82,6 +82,12 @@ const DEFAULT_TIMEZONE: Tz = chrono_tz::US::Eastern;
 // HTTP server port
 const HTTP_PORT: u16 = 8080;
 
+// AP SSID - can be overridden at build time with AP_SSID env var
+const AP_SSID: &str = match option_env!("AP_SSID") {
+    Some(ssid) => ssid,
+    None => "nixie-clock",
+};
+
 /// Helper macro to create static storage for values that need 'static lifetime
 macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
@@ -317,8 +323,7 @@ async fn connection(
                                         ClientConfig::default()
                                             .with_ssid(new_ssid)
                                             .with_password(new_pass),
-                                        AccessPointConfig::default()
-                                            .with_ssid("nixie-clock".into()),
+                                        AccessPointConfig::default().with_ssid(AP_SSID.into()),
                                     );
                                     controller.set_config(&client_config).unwrap();
                                     println!("WiFi reconfigured with new credentials");
@@ -582,7 +587,7 @@ async fn main(spawner: Spawner) -> ! {
             ClientConfig::default()
                 .with_ssid(app_config.wifi_ssid().into())
                 .with_password(app_config.wifi_pass().into()),
-            AccessPointConfig::default().with_ssid("nixie-clock".into()),
+            AccessPointConfig::default().with_ssid(AP_SSID.into()),
         );
         controller.set_config(&client_config).unwrap();
 
@@ -765,8 +770,8 @@ async fn main(spawner: Spawner) -> ! {
     // Print connection info
     println!("HTTP: Starting web server on port {}", HTTP_PORT);
     println!(
-        "HTTP: Connect to 'nixie-clock' WiFi and browse to http://192.168.4.1:{}",
-        HTTP_PORT
+        "HTTP: Connect to '{}' WiFi and browse to http://192.168.4.1:{}",
+        AP_SSID, HTTP_PORT
     );
     if let Some(cfg) = sta_stack.config_v4() {
         println!(
