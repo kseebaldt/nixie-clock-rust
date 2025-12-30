@@ -40,7 +40,7 @@ use sntpc::{NtpContext, NtpTimestampGenerator, get_time};
 use static_cell::StaticCell;
 
 use chrono::NaiveDateTime;
-use drivers::config::{Config, InternalConfig};
+use drivers::config::InternalConfig;
 use drivers::debouncer::Debouncer;
 use drivers::nixie_display::{DisplayMode, HourFormat, NixieDisplay};
 use drivers::rgb_led::RgbLed;
@@ -80,9 +80,6 @@ const DEFAULT_TIMEZONE_OFFSET_SECS: i64 = -5 * 3600; // EST
 
 // HTTP server port
 const HTTP_PORT: u16 = 8080;
-
-// Embedded webapp HTML
-static INDEX_HTML: &str = include_str!("../../../webapp/dist/index.html");
 
 // When you are okay with using a nightly compiler it's better to use https://docs.rs/static_cell/2.1.0/static_cell/macro.make_static.html
 macro_rules! mk_static {
@@ -833,234 +830,49 @@ async fn main(spawner: Spawner) -> ! {
         );
     }
 
-    // Run HTTP server listening on both AP and STA interfaces
-    use embassy_futures::select::Either;
-    use embassy_net::IpListenEndpoint;
-    use embassy_net::tcp::TcpSocket;
-    use embedded_io_async::Write;
+    // Create picoserve app using AppWithStateBuilder pattern
+    use clock_no_std::http::{AppProps, AppState, server_config};
+    use picoserve::{AppRouter, AppWithStateBuilder};
 
-    // Separate buffers for AP and STA sockets
-    let mut ap_rx_buffer = [0; 4096];
-    let mut ap_tx_buffer = [0; 4096];
-    let mut sta_rx_buffer = [0; 4096];
-    let mut sta_tx_buffer = [0; 4096];
+    let app: &'static AppRouter<AppProps> = mk_static!(AppRouter<AppProps>, AppProps.build_app());
+    let server_cfg = mk_static!(picoserve::Config<Duration>, server_config());
 
-    let mut ap_socket = TcpSocket::new(ap_stack, &mut ap_rx_buffer, &mut ap_tx_buffer);
-    ap_socket.set_timeout(Some(Duration::from_secs(30)));
+    let app_state: &'static AppState = mk_static!(
+        AppState,
+        AppState {
+            config_storage,
+            config_sender: config_watch.sender(),
+            current_config: config,
+        }
+    );
 
-    let mut sta_socket = TcpSocket::new(sta_stack, &mut sta_rx_buffer, &mut sta_tx_buffer);
-    sta_socket.set_timeout(Some(Duration::from_secs(30)));
+    // Run HTTP servers on both AP and STA interfaces concurrently
+    let mut ap_rx = [0; 2048];
+    let mut ap_tx = [0; 2048];
+    let mut sta_rx = [0; 2048];
+    let mut sta_tx = [0; 2048];
+    let mut ap_http = [0; 2048];
+    let mut sta_http = [0; 2048];
 
+    println!("HTTP: Listening on AP and STA interfaces...");
+
+    // Use select to run both servers - whichever gets a connection first handles it
     loop {
-        println!("HTTP: Waiting for connection on AP or STA...");
-
-        // Wait for connection on either AP or STA interface
-        let listen_endpoint = IpListenEndpoint {
-            addr: None,
-            port: HTTP_PORT,
-        };
-
-        let either_socket = embassy_futures::select::select(
-            ap_socket.accept(listen_endpoint),
-            sta_socket.accept(listen_endpoint),
+        embassy_futures::select::select(
+            picoserve::Server::new(
+                &app.shared().with_state(app_state),
+                server_cfg,
+                &mut ap_http,
+            )
+            .listen_and_serve("AP", ap_stack, HTTP_PORT, &mut ap_rx, &mut ap_tx),
+            picoserve::Server::new(
+                &app.shared().with_state(app_state),
+                server_cfg,
+                &mut sta_http,
+            )
+            .listen_and_serve("STA", sta_stack, HTTP_PORT, &mut sta_rx, &mut sta_tx),
         )
         .await;
-
-        let (r, socket, interface_name) = match either_socket {
-            Either::First(r) => (r, &mut ap_socket, "AP"),
-            Either::Second(r) => (r, &mut sta_socket, "STA"),
-        };
-
-        if let Err(e) = r {
-            println!("HTTP: Accept error on {}: {:?}", interface_name, e);
-            continue;
-        }
-
-        println!("HTTP: Client connected via {}!", interface_name);
-
-        // Read request (headers + body for POST)
-        let mut buffer = [0u8; 2048];
-        let mut pos = 0;
-        let mut header_end = 0;
-        let mut content_length: usize = 0;
-
-        // Read until we have all headers
-        loop {
-            match socket.read(&mut buffer[pos..]).await {
-                Ok(0) => {
-                    println!("HTTP: read EOF");
-                    break;
-                }
-                Ok(len) => {
-                    pos += len;
-                    // Check for end of HTTP headers
-                    if let Some(idx) = buffer[..pos].windows(4).position(|w| w == b"\r\n\r\n") {
-                        header_end = idx + 4;
-                        // Parse Content-Length from headers
-                        let headers = core::str::from_utf8(&buffer[..header_end]).unwrap_or("");
-                        for line in headers.lines() {
-                            if line.to_ascii_lowercase().starts_with("content-length:")
-                                && let Some(len_str) = line.split(':').nth(1)
-                            {
-                                content_length = len_str.trim().parse().unwrap_or(0);
-                            }
-                        }
-                        break;
-                    }
-                    if pos >= buffer.len() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    println!("HTTP: Read error: {:?}", e);
-                    break;
-                }
-            }
-        }
-
-        // Read body if Content-Length indicates more data
-        let body_so_far = pos - header_end;
-        if content_length > 0 && body_so_far < content_length {
-            let remaining = content_length - body_so_far;
-            let to_read = remaining.min(buffer.len() - pos);
-            if to_read > 0 {
-                match socket.read(&mut buffer[pos..pos + to_read]).await {
-                    Ok(n) => pos += n,
-                    Err(e) => println!("HTTP: Body read error: {:?}", e),
-                }
-            }
-        }
-
-        // Parse request line
-        let request = core::str::from_utf8(&buffer[..header_end]).unwrap_or("");
-        let first_line = request.lines().next().unwrap_or("");
-        let mut parts = first_line.split_whitespace();
-        let method = parts.next().unwrap_or("GET");
-        let path = parts.next().unwrap_or("/");
-
-        // Extract body for POST requests
-        let body = if header_end < pos {
-            core::str::from_utf8(&buffer[header_end..pos]).unwrap_or("")
-        } else {
-            ""
-        };
-
-        println!("HTTP: {} {} (body: {} bytes)", method, path, body.len());
-
-        // Send response
-        let response = match (method, path) {
-            ("GET", "/") => {
-                let header = "HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n";
-                let _ = socket.write_all(header.as_bytes()).await;
-                let _ = socket.write_all(INDEX_HTML.as_bytes()).await;
-                "index"
-            }
-            ("GET", "/config") => {
-                // Get current config from mutex and convert to JSON-friendly Config
-                let current_config = config.lock().await;
-                let json_config: Config = (*current_config).clone().into();
-                drop(current_config);
-
-                // Serialize to JSON
-                let mut json_buf = [0u8; 512];
-                match serde_json_core::to_slice(&json_config, &mut json_buf) {
-                    Ok(len) => {
-                        let header = "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n";
-                        let _ = socket.write_all(header.as_bytes()).await;
-                        let _ = socket.write_all(&json_buf[..len]).await;
-                    }
-                    Err(e) => {
-                        println!("HTTP: JSON serialize error: {:?}", e);
-                        let header = "HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nJSON error";
-                        let _ = socket.write_all(header.as_bytes()).await;
-                    }
-                }
-                "config GET"
-            }
-            ("POST", "/config") => {
-                // Parse JSON body
-                match serde_json_core::from_str::<Config>(body) {
-                    Ok((new_config, _)) => {
-                        // Validate config
-                        if let Err(e) = new_config.validate() {
-                            println!("HTTP: Config validation error: {} - {}", e.field, e.message);
-                            let error_body = "{\"error\":\"validation failed\"}";
-                            let header = "HTTP/1.0 400 Bad Request\r\nContent-Type: application/json\r\n\r\n";
-                            let _ = socket.write_all(header.as_bytes()).await;
-                            let _ = socket.write_all(error_body.as_bytes()).await;
-                        } else {
-                            // Convert to internal config
-                            let internal_config: InternalConfig = new_config.into();
-
-                            // Serialize config using postcard
-                            let mut serialized_buf = [0u8; 256];
-                            let serialized = match postcard::to_slice(
-                                &internal_config,
-                                &mut serialized_buf,
-                            ) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    println!("HTTP: Failed to serialize config: {:?}", e);
-                                    let header = "HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nSerialization error";
-                                    let _ = socket.write_all(header.as_bytes()).await;
-                                    continue;
-                                }
-                            };
-
-                            // Save to flash storage
-                            let mut storage_guard = config_storage.lock().await;
-                            match storage_guard.save(serialized).await {
-                                Ok(()) => {
-                                    println!("HTTP: Config saved to flash");
-                                }
-                                Err(e) => {
-                                    println!("HTTP: Failed to save config to flash: {:?}", e);
-                                }
-                            }
-                            drop(storage_guard);
-
-                            // Update the shared config mutex
-                            let mut cfg_guard = config.lock().await;
-                            *cfg_guard = internal_config.clone();
-                            drop(cfg_guard);
-
-                            // Send new config to all watchers
-                            config_watch.sender().send(internal_config.clone());
-
-                            println!("HTTP: Config updated: {:?}", internal_config);
-
-                            // Send success response
-                            let header =
-                                "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n";
-                            let _ = socket.write_all(header.as_bytes()).await;
-                            let _ = socket.write_all(b"{\"status\":\"ok\"}").await;
-                        }
-                    }
-                    Err(e) => {
-                        println!("HTTP: JSON parse error: {:?}", e);
-                        let error_body = "{\"error\":\"invalid JSON\"}";
-                        let header =
-                            "HTTP/1.0 400 Bad Request\r\nContent-Type: application/json\r\n\r\n";
-                        let _ = socket.write_all(header.as_bytes()).await;
-                        let _ = socket.write_all(error_body.as_bytes()).await;
-                    }
-                }
-                "config POST"
-            }
-            _ => {
-                let header = "HTTP/1.0 404 Not Found\r\nContent-Type: text/plain\r\n\r\nNot Found";
-                let _ = socket.write_all(header.as_bytes()).await;
-                "404"
-            }
-        };
-
-        println!("HTTP: Sent {} response", response);
-
-        let _ = socket.flush().await;
-        Timer::after(Duration::from_millis(1000)).await;
-        socket.close();
-        Timer::after(Duration::from_millis(1000)).await;
-        socket.abort();
     }
 }
 
