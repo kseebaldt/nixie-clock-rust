@@ -80,7 +80,15 @@ async fn post_config(
     // Validate config
     if let Err(e) = new_config.validate() {
         println!("HTTP: Config validation error: {} - {}", e.field, e.message);
-        return (StatusCode::BAD_REQUEST, "{\"error\":\"validation failed\"}");
+        // Use heapless::String for the error response (max 128 bytes should be enough)
+        use core::fmt::Write;
+        let mut error_json: heapless::String<128> = heapless::String::new();
+        let _ = write!(
+            error_json,
+            r#"{{"field":"{}","message":"{}"}}"#,
+            e.field, e.message
+        );
+        return (StatusCode::BAD_REQUEST, error_json);
     }
 
     // Convert to internal config
@@ -94,7 +102,7 @@ async fn post_config(
             println!("HTTP: Failed to serialize config: {:?}", e);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "{\"error\":\"serialization failed\"}",
+                heapless::String::try_from(r#"{"error":"serialization failed"}"#).unwrap(),
             );
         }
     };
@@ -118,5 +126,8 @@ async fn post_config(
     state.config_sender.send(internal_config);
     println!("HTTP: Config updated and broadcast");
 
-    (StatusCode::OK, "{\"status\":\"ok\"}")
+    (
+        StatusCode::OK,
+        heapless::String::try_from(r#"{"status":"ok"}"#).unwrap(),
+    )
 }
