@@ -68,9 +68,9 @@ static CONFIG: StaticCell<ConfigMutex> = StaticCell::new();
 type SeqConfigStorageMutex = Mutex<CriticalSectionRawMutex, SeqConfigStorage<'static>>;
 static CONFIG_STORAGE: StaticCell<SeqConfigStorageMutex> = StaticCell::new();
 
-// Signal to trigger WiFi reconnection when credentials change
-type WifiReconnectSignal = Signal<CriticalSectionRawMutex, ()>;
-static WIFI_RECONNECT: StaticCell<WifiReconnectSignal> = StaticCell::new();
+// Signal that config has changed - tasks watch this and react accordingly
+type ConfigChangedSignal = Signal<CriticalSectionRawMutex, ()>;
+static CONFIG_CHANGED: StaticCell<ConfigChangedSignal> = StaticCell::new();
 
 // NTP server to use for time sync
 const NTP_SERVER: &str = "pool.ntp.org";
@@ -269,14 +269,24 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
 }
 
 /// Task to manage WiFi connection and reconnection (AP+STA mode)
+/// Watches config_changed signal and reconnects if WiFi credentials changed
 #[embassy_executor::task]
 async fn connection(
     mut controller: WifiController<'static>,
     config: &'static ConfigMutex,
-    wifi_reconnect: &'static WifiReconnectSignal,
+    config_changed: &'static ConfigChangedSignal,
 ) {
     println!("start connection task");
     println!("Device capabilities: {:?}", controller.capabilities());
+
+    // Track current WiFi credentials to detect changes
+    let (mut current_ssid, mut current_pass) = {
+        let cfg = config.lock().await;
+        (
+            alloc::string::String::from(cfg.wifi_ssid()),
+            alloc::string::String::from(cfg.wifi_pass()),
+        )
+    };
 
     println!("Starting wifi (AP+STA mode)");
     controller.start_async().await.unwrap();
@@ -289,11 +299,11 @@ async fn connection(
                 match controller.connect_async().await {
                     Ok(_) => {
                         println!("STA connected!");
-                        // Wait for either disconnection OR reconnect signal
+                        // Wait for either disconnection OR config change signal
                         use embassy_futures::select::{Either, select};
                         match select(
                             controller.wait_for_event(WifiEvent::StaDisconnected),
-                            wifi_reconnect.wait(),
+                            config_changed.wait(),
                         )
                         .await
                         {
@@ -301,45 +311,63 @@ async fn connection(
                                 println!("STA disconnected");
                             }
                             Either::Second(_) => {
-                                println!("WiFi reconnect signal received, reconfiguring...");
-                                // Disconnect first
-                                let _ = controller.disconnect_async().await;
-
-                                // Get new credentials from config
-                                let (ssid, password) = {
+                                // Config changed - check if WiFi credentials changed
+                                let (new_ssid, new_pass) = {
                                     let cfg = config.lock().await;
-                                    (cfg.wifi_ssid().into(), cfg.wifi_pass().into())
+                                    (
+                                        alloc::string::String::from(cfg.wifi_ssid()),
+                                        alloc::string::String::from(cfg.wifi_pass()),
+                                    )
                                 };
 
-                                // Reconfigure with new credentials
-                                let client_config = ModeConfig::ApSta(
-                                    ClientConfig::default()
-                                        .with_ssid(ssid)
-                                        .with_password(password),
-                                    AccessPointConfig::default().with_ssid("nixie-clock".into()),
-                                );
-                                controller.set_config(&client_config).unwrap();
-                                println!("WiFi reconfigured with new credentials");
+                                if new_ssid != current_ssid || new_pass != current_pass {
+                                    println!("WiFi credentials changed, reconfiguring...");
+                                    current_ssid = new_ssid.clone();
+                                    current_pass = new_pass.clone();
+
+                                    // Disconnect first
+                                    let _ = controller.disconnect_async().await;
+
+                                    // Reconfigure with new credentials
+                                    let client_config = ModeConfig::ApSta(
+                                        ClientConfig::default()
+                                            .with_ssid(new_ssid)
+                                            .with_password(new_pass),
+                                        AccessPointConfig::default()
+                                            .with_ssid("nixie-clock".into()),
+                                    );
+                                    controller.set_config(&client_config).unwrap();
+                                    println!("WiFi reconfigured with new credentials");
+                                }
                             }
                         }
                     }
                     Err(e) => {
                         println!("Failed to connect to wifi: {e:?}");
-                        // Check if there's a pending reconnect signal (credentials changed while disconnected)
-                        if wifi_reconnect.signaled() {
-                            wifi_reconnect.wait().await; // Clear the signal
-                            println!("WiFi credentials changed, reconfiguring...");
-                            let (ssid, password) = {
+                        // Check if there's a pending config change (credentials changed while disconnected)
+                        if config_changed.signaled() {
+                            config_changed.wait().await; // Clear the signal
+                            let (new_ssid, new_pass) = {
                                 let cfg = config.lock().await;
-                                (cfg.wifi_ssid().into(), cfg.wifi_pass().into())
+                                (
+                                    alloc::string::String::from(cfg.wifi_ssid()),
+                                    alloc::string::String::from(cfg.wifi_pass()),
+                                )
                             };
-                            let client_config = ModeConfig::ApSta(
-                                ClientConfig::default()
-                                    .with_ssid(ssid)
-                                    .with_password(password),
-                                AccessPointConfig::default().with_ssid("nixie-clock".into()),
-                            );
-                            controller.set_config(&client_config).unwrap();
+
+                            if new_ssid != current_ssid || new_pass != current_pass {
+                                println!("WiFi credentials changed, reconfiguring...");
+                                current_ssid = new_ssid.clone();
+                                current_pass = new_pass.clone();
+
+                                let client_config = ModeConfig::ApSta(
+                                    ClientConfig::default()
+                                        .with_ssid(new_ssid)
+                                        .with_password(new_pass),
+                                    AccessPointConfig::default().with_ssid("nixie-clock".into()),
+                                );
+                                controller.set_config(&client_config).unwrap();
+                            }
                         }
                         Timer::after(Duration::from_millis(5000)).await
                     }
@@ -528,8 +556,8 @@ async fn main(spawner: Spawner) -> ! {
     // Store config in static for sharing between tasks
     let config = CONFIG.init(Mutex::new(app_config.clone()));
 
-    // Initialize WiFi reconnect signal
-    let wifi_reconnect = WIFI_RECONNECT.init(Signal::new());
+    // Initialize config changed signal - watched by WiFi task and others
+    let config_changed = CONFIG_CHANGED.init(Signal::new());
 
     // =========================================================================
     // WiFi Setup (AP + STA mode for both internet access and local server)
@@ -587,7 +615,7 @@ async fn main(spawner: Spawner) -> ! {
 
         // Spawn network tasks
         spawner
-            .spawn(connection(controller, config, wifi_reconnect))
+            .spawn(connection(controller, config, config_changed))
             .ok();
         spawner.spawn(net_task(ap_runner)).ok();
         spawner.spawn(net_task(sta_runner)).ok();
@@ -989,23 +1017,13 @@ async fn main(spawner: Spawner) -> ! {
                             }
                             drop(storage_guard);
 
-                            // Check if WiFi credentials changed
-                            let wifi_changed = {
-                                let cfg_guard = config.lock().await;
-                                cfg_guard.wifi_ssid() != internal_config.wifi_ssid()
-                                    || cfg_guard.wifi_pass() != internal_config.wifi_pass()
-                            };
-
                             // Update the shared config mutex
                             let mut cfg_guard = config.lock().await;
                             *cfg_guard = internal_config.clone();
                             drop(cfg_guard);
 
-                            // Signal WiFi reconnect if credentials changed
-                            if wifi_changed {
-                                println!("HTTP: WiFi credentials changed, signaling reconnect");
-                                wifi_reconnect.signal(());
-                            }
+                            // Signal that config changed - tasks will check what they care about
+                            config_changed.signal(());
 
                             // Apply LED color immediately
                             if let Err(e) = rgb.set_color(internal_config.led_color()) {
