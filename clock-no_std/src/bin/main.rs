@@ -17,6 +17,7 @@ use embassy_time::{Duration, Ticker, Timer};
 use embedded_hal::digital::InputPin;
 use esp_alloc as _;
 use esp_backtrace as _;
+use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::{
     clock::CpuClock,
     gpio::{DriveMode, Input, InputConfig, Level, Output, OutputConfig, Pull},
@@ -33,10 +34,12 @@ use esp_hal::{
 };
 use esp_println::println;
 use esp_radio::wifi::{
-    AccessPointConfig, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent,
+    Config as WifiConfig, ControllerConfig, Interface, WifiController, ap::AccessPointConfig,
+    sta::StationConfig,
 };
 
 use sntpc::{NtpContext, NtpTimestampGenerator, get_time};
+use sntpc_net_embassy::UdpSocketWrapper;
 use static_cell::StaticCell;
 
 use chrono::{DateTime, Timelike};
@@ -93,7 +96,7 @@ macro_rules! mk_static {
     ($t:ty,$val:expr) => {{
         static STATIC_CELL: StaticCell<$t> = StaticCell::new();
         #[deny(unused_attributes)]
-        let x = STATIC_CELL.uninit().write(($val));
+        let x = STATIC_CELL.uninit().write($val);
         x
     }};
 }
@@ -111,7 +114,7 @@ async fn debounce_task(debouncer: &'static DebouncerMutex) {
 
 /// Task to run the embassy-net network stack (pool_size=2 for AP and STA)
 #[embassy_executor::task(pool_size = 2)]
-async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+async fn net_task(mut runner: Runner<'static, Interface<'static>>) {
     runner.run().await
 }
 
@@ -121,7 +124,7 @@ async fn http_server_task(
     name: &'static str,
     stack: Stack<'static>,
     app: &'static picoserve::AppRouter<clock_no_std::http::AppProps>,
-    config: &'static picoserve::Config<Duration>,
+    config: &'static picoserve::Config,
     state: &'static clock_no_std::http::AppState,
 ) {
     let mut rx = [0; 2048];
@@ -224,7 +227,6 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
     let mut cached_addr: Option<IpAddr> = None;
 
     loop {
-        // Use cached IP or resolve via DNS
         let addr = match cached_addr {
             Some(ip) => ip,
             None => {
@@ -264,6 +266,8 @@ async fn ntp_sync_task(stack: Stack<'static>, rtc: &'static Rtc<'static>) {
             Timer::after(Duration::from_secs(30)).await;
             continue;
         }
+
+        let socket = UdpSocketWrapper::from(socket);
 
         // Perform NTP request using sntpc
         let context = NtpContext::new(RtcTimestamp {
@@ -309,77 +313,66 @@ async fn connection(
     mut config_receiver: embassy_sync::watch::DynReceiver<'static, InternalConfig>,
 ) {
     println!("start connection task");
-    println!("Device capabilities: {:?}", controller.capabilities());
 
-    // Track current WiFi credentials to detect changes
-    let mut current_ssid = alloc::string::String::new();
-    let mut current_pass = alloc::string::String::new();
-
-    println!("Starting wifi (AP+STA mode)");
-    controller.start_async().await.unwrap();
-    println!("Wifi started!");
+    // Seed credential tracking from the initial config so the first watch event
+    // (which always fires with the cached value) doesn't false-trigger a reconfigure.
+    let initial = config_receiver.changed().await;
+    let mut current_ssid = alloc::string::String::from(initial.wifi_ssid());
+    let mut current_pass = alloc::string::String::from(initial.wifi_pass());
 
     loop {
-        match esp_radio::wifi::ap_state() {
-            esp_radio::wifi::WifiApState::Started => {
-                println!("About to connect to STA...");
-                match controller.connect_async().await {
-                    Ok(_) => {
-                        println!("STA connected!");
+        match controller.connect_async().await {
+            Ok(_) => {
+                println!("STA connected!");
 
-                        // Wait for disconnection or config change
-                        use embassy_futures::select::{Either, select};
-                        match select(
-                            controller.wait_for_event(WifiEvent::StaDisconnected),
-                            config_receiver.changed(),
-                        )
-                        .await
-                        {
-                            Either::First(_) => {
-                                println!("STA disconnected");
-                            }
-                            Either::Second(new_config) => {
-                                // Check if WiFi credentials changed
-                                let new_ssid = alloc::string::String::from(new_config.wifi_ssid());
-                                let new_pass = alloc::string::String::from(new_config.wifi_pass());
-
-                                if new_ssid != current_ssid || new_pass != current_pass {
-                                    println!("WiFi credentials changed, reconfiguring...");
-                                    current_ssid = new_ssid.clone();
-                                    current_pass = new_pass.clone();
-
-                                    // Disconnect first
-                                    let _ = controller.disconnect_async().await;
-
-                                    // Reconfigure with new credentials
-                                    let client_config = ModeConfig::ApSta(
-                                        ClientConfig::default()
-                                            .with_ssid(new_ssid)
-                                            .with_password(new_pass),
-                                        AccessPointConfig::default().with_ssid(AP_SSID.into()),
-                                    );
-                                    controller.set_config(&client_config).unwrap();
-                                    println!("WiFi reconfigured with new credentials");
-                                }
-                            }
+                // Inner loop: stay connected, only break out (and re-enter
+                // connect_async) on actual disconnect or credentials change.
+                // A spurious config_watch event with unchanged credentials must
+                // NOT cause us to loop back to connect_async — that would tear
+                // down the active connection.
+                'connected: loop {
+                    use embassy_futures::select::{Either, select};
+                    match select(
+                        controller.wait_for_disconnect_async(),
+                        config_receiver.changed(),
+                    )
+                    .await
+                    {
+                        Either::First(info) => {
+                            println!("STA disconnected: {:?}", info.ok());
+                            break 'connected;
                         }
-                    }
-                    Err(e) => {
-                        println!("Failed to connect to wifi: {e:?}");
-                        Timer::after(Duration::from_millis(5000)).await
+                        Either::Second(new_config) => {
+                            let new_ssid = alloc::string::String::from(new_config.wifi_ssid());
+                            let new_pass = alloc::string::String::from(new_config.wifi_pass());
+
+                            if new_ssid == current_ssid && new_pass == current_pass {
+                                // No change; keep waiting for disconnect.
+                                continue 'connected;
+                            }
+
+                            println!("WiFi credentials changed, reconfiguring...");
+                            current_ssid = new_ssid.clone();
+                            current_pass = new_pass.clone();
+
+                            let _ = controller.disconnect_async().await;
+
+                            let new_wifi_config = WifiConfig::AccessPointStation(
+                                StationConfig::default()
+                                    .with_ssid(new_ssid.as_str())
+                                    .with_password(new_pass),
+                                AccessPointConfig::default().with_ssid(AP_SSID),
+                            );
+                            controller.set_config(&new_wifi_config).unwrap();
+                            println!("WiFi reconfigured with new credentials");
+                            break 'connected;
+                        }
                     }
                 }
             }
-            _ => {
-                // Controller stopped, try to restart it
-                println!("WiFi controller stopped, restarting...");
-                match controller.start_async().await {
-                    Ok(_) => println!("WiFi controller started"),
-                    Err(e) => {
-                        println!("Failed to start WiFi: {:?}", e);
-                        Timer::after(Duration::from_secs(5)).await;
-                    }
-                }
+            Err(e) => {
+                println!("Failed to connect to wifi: {e:?}");
+                Timer::after(Duration::from_millis(5000)).await
             }
         }
     }
@@ -525,7 +518,8 @@ async fn main(spawner: Spawner) -> ! {
     esp_alloc::heap_allocator!(size: 36 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timg0.timer0);
+    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
     // Initialize RTC for timekeeping (used with NTP)
     let rtc = {
@@ -586,30 +580,36 @@ async fn main(spawner: Spawner) -> ! {
 
     let (ap_stack, sta_stack) = {
         println!("Initializing WiFi...");
-        let esp_radio_ctrl =
-            &*mk_static!(esp_radio::Controller<'static>, esp_radio::init().unwrap());
-        let (mut controller, interfaces) =
-            esp_radio::wifi::new(esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
+        println!("WiFi STA credentials: SSID='{}'", app_config.wifi_ssid());
 
-        let wifi_ap_device = interfaces.ap;
-        let wifi_sta_device = interfaces.sta;
+        let initial_wifi_config = WifiConfig::AccessPointStation(
+            StationConfig::default()
+                .with_ssid(app_config.wifi_ssid())
+                .with_password(app_config.wifi_pass().into()),
+            AccessPointConfig::default().with_ssid(AP_SSID),
+        );
+
+        let (controller, interfaces) = esp_radio::wifi::new(
+            peripherals.WIFI,
+            ControllerConfig::default().with_initial_config(initial_wifi_config),
+        )
+        .unwrap();
+
+        let wifi_ap_device = interfaces.access_point;
+        let wifi_sta_device = interfaces.station;
 
         println!("WiFi controller initialized");
 
-        // AP config with static IP
         let ap_config = embassy_net::Config::ipv4_static(StaticConfigV4 {
             address: Ipv4Cidr::new(core::net::Ipv4Addr::new(192, 168, 4, 1), 24),
             gateway: Some(core::net::Ipv4Addr::new(192, 168, 4, 1)),
             dns_servers: Default::default(),
         });
-
-        // STA config with DHCP
         let sta_config = embassy_net::Config::dhcpv4(Default::default());
 
         let rng = Rng::new();
         let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-        // Create both network stacks
         let (ap_stack, ap_runner) = embassy_net::new(
             wifi_ap_device,
             ap_config,
@@ -623,30 +623,16 @@ async fn main(spawner: Spawner) -> ! {
             seed,
         );
 
-        // Configure AP+STA mode using credentials from config
-        println!("WiFi STA credentials: SSID='{}'", app_config.wifi_ssid());
-
-        let client_config = ModeConfig::ApSta(
-            ClientConfig::default()
-                .with_ssid(app_config.wifi_ssid().into())
-                .with_password(app_config.wifi_pass().into()),
-            AccessPointConfig::default().with_ssid(AP_SSID.into()),
-        );
-        controller.set_config(&client_config).unwrap();
-
-        // Spawn network tasks
-        spawner
-            .spawn(connection(controller, config_watch.dyn_receiver().unwrap()))
-            .ok();
-        spawner.spawn(net_task(ap_runner)).ok();
-        spawner.spawn(net_task(sta_runner)).ok();
+        spawner.spawn(connection(controller, config_watch.dyn_receiver().unwrap()).unwrap());
+        spawner.spawn(net_task(ap_runner).unwrap());
+        spawner.spawn(net_task(sta_runner).unwrap());
 
         println!("Network tasks spawned (AP+STA mode)");
         (ap_stack, sta_stack)
     };
 
-    // Spawn DHCP server for AP mode (so clients can get an IP)
-    spawner.spawn(dhcp_server_task(ap_stack)).ok();
+    // Spawn DHCP server for AP mode (so clients connecting to the SSID get an IP)
+    spawner.spawn(dhcp_server_task(ap_stack).unwrap());
 
     // =========================================================================
     // GPIO Setup
@@ -723,9 +709,7 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     // Spawn RGB LED task with config watch receiver
-    spawner
-        .spawn(rgb_led_task(rgb, config_watch.dyn_receiver().unwrap()))
-        .ok();
+    spawner.spawn(rgb_led_task(rgb, config_watch.dyn_receiver().unwrap()).unwrap());
     println!("RGB LED task spawned");
 
     // =========================================================================
@@ -735,11 +719,9 @@ async fn main(spawner: Spawner) -> ! {
     let debouncer = DEBOUNCER.init(Mutex::new(Debouncer::new(0.1, 100, button_pin)));
     let display_mode = DISPLAY_MODE.init(Mutex::new(DisplayMode::Time));
 
-    // Spawn debounce task
-    spawner.spawn(debounce_task(debouncer)).ok();
+    spawner.spawn(debounce_task(debouncer).unwrap());
     println!("Debouncer task spawned");
 
-    // Spawn display task
     let display_pins = DisplayPins {
         data: data_pin,
         clock: clock_pin,
@@ -747,22 +729,13 @@ async fn main(spawner: Spawner) -> ! {
         sep1,
         sep2,
     };
-    spawner
-        .spawn(display_task(
-            rtc,
-            debouncer,
-            display_mode,
-            config,
-            display_pins,
-        ))
-        .ok();
+    spawner.spawn(display_task(rtc, debouncer, display_mode, config, display_pins).unwrap());
     println!("Display task spawned");
 
     // =========================================================================
     // Wait for WiFi connection (both AP and STA)
     // =========================================================================
 
-    // Wait for AP to be ready (should be immediate with static IP)
     println!("Waiting for AP interface...");
     loop {
         if ap_stack.is_link_up() && ap_stack.is_config_up() {
@@ -787,6 +760,9 @@ async fn main(spawner: Spawner) -> ! {
     loop {
         if let Some(cfg) = sta_stack.config_v4() {
             println!("STA got IP: {}", cfg.address);
+            println!("STA gateway: {:?}", cfg.gateway);
+            println!("STA DNS servers (from DHCP): {:?}", cfg.dns_servers);
+
             // Send current config to trigger RGB task to set the configured color
             config_watch.sender().send(app_config.clone());
             break;
@@ -804,7 +780,7 @@ async fn main(spawner: Spawner) -> ! {
     println!("WiFi connected with IP, starting services");
 
     // Spawn NTP sync task (uses STA stack for internet access)
-    spawner.spawn(ntp_sync_task(sta_stack, rtc)).ok();
+    spawner.spawn(ntp_sync_task(sta_stack, rtc).unwrap());
 
     // =========================================================================
     // HTTP Server (runs in main)
@@ -821,7 +797,7 @@ async fn main(spawner: Spawner) -> ! {
     use picoserve::{AppRouter, AppWithStateBuilder};
 
     let app: &'static AppRouter<AppProps> = mk_static!(AppRouter<AppProps>, AppProps.build_app());
-    let server_cfg = mk_static!(picoserve::Config<Duration>, server_config());
+    let server_cfg = mk_static!(picoserve::Config, server_config());
 
     let app_state: &'static AppState = mk_static!(
         AppState,
@@ -837,12 +813,8 @@ async fn main(spawner: Spawner) -> ! {
         HTTP_PORT
     );
 
-    // Only run HTTP on AP - running on both AP+STA causes WiFi to die
-    // (likely embassy-net/esp-radio resource exhaustion with dual listeners)
-    // STA is used for outbound connections (NTP, keepalive)
-    spawner
-        .spawn(http_server_task("AP", ap_stack, app, server_cfg, app_state))
-        .ok();
+    spawner.spawn(http_server_task("AP", ap_stack, app, server_cfg, app_state).unwrap());
+    spawner.spawn(http_server_task("STA", sta_stack, app, server_cfg, app_state).unwrap());
 
     // Main task - periodic WiFi keepalive
     // Prevents WiFi from going idle (esp-radio may need periodic activity)

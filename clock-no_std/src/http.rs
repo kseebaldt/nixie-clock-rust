@@ -49,13 +49,13 @@ impl AppWithStateBuilder for AppProps {
 }
 
 /// Server configuration
-pub fn server_config() -> picoserve::Config<Duration> {
+pub fn server_config() -> picoserve::Config {
     picoserve::Config {
         timeouts: picoserve::Timeouts {
-            start_read_request: Some(Duration::from_secs(5)),
-            persistent_start_read_request: Some(Duration::from_secs(1)),
-            read_request: Some(Duration::from_secs(1)),
-            write: Some(Duration::from_secs(1)),
+            start_read_request: Duration::from_secs(5),
+            persistent_start_read_request: Duration::from_secs(1),
+            read_request: Duration::from_secs(1),
+            write: Duration::from_secs(1),
         },
         // Close connection after each request to prevent socket exhaustion
         connection: picoserve::KeepAlive::Close,

@@ -1,8 +1,11 @@
 [target.xtensa-esp32-none-elf]
-runner = "espflash flash --monitor --chip esp32 --log-format defmt"
+runner = "espflash flash --monitor --chip esp32"
 
 [env]
-DEFMT_LOG="info"
+ESP_LOG = "info"
+# Required for AP+STA mode: the default event channel is too small for both
+# AP-side and STA-side WiFi events to coexist, which silently drops events.
+ESP_RADIO_CONFIG_EVENT_CHANNEL_CAPACITY = "4"
 
 [build]
 rustflags = [
