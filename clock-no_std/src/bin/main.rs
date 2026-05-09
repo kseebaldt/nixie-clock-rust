@@ -82,8 +82,8 @@ const NTP_SERVER: &str = "pool.ntp.org";
 // Default timezone when parsing fails
 const DEFAULT_TIMEZONE: Tz = chrono_tz::US::Eastern;
 
-// HTTP server port
-const HTTP_PORT: u16 = 8080;
+// HTTP server port (matches the esp-idf clock — port 80, no port in URL)
+const HTTP_PORT: u16 = 80;
 
 // AP SSID - can be overridden at build time with AP_SSID env var
 const AP_SSID: &str = match option_env!("AP_SSID") {
@@ -788,7 +788,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // Print connection info
     println!(
-        "HTTP: Connect to '{}' WiFi and browse to http://192.168.4.1:{}",
+        "HTTP: Connect to '{}' WiFi and browse to http://192.168.4.1/ (port {})",
         AP_SSID, HTTP_PORT
     );
 
